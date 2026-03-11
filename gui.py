@@ -243,6 +243,22 @@ class RotateApp(QMainWindow):
         self.zoom_combo_comp.currentTextChanged.connect(self.on_zoom_change)
         left_panel.addWidget(self.zoom_combo_comp)
 
+        # Lanczos a slider (Comparison tab)
+        lanczos_group = QGroupBox("Lanczos a (manual)")
+        lanczos_layout = QVBoxLayout(lanczos_group)
+        self.comp_a_slider = QSlider(Qt.Horizontal)
+        self.comp_a_slider.setMinimum(1)
+        self.comp_a_slider.setMaximum(6)
+        self.comp_a_slider.setValue(self.a_value)
+        self.comp_a_slider.setTickInterval(1)
+        self.comp_a_slider.setTickPosition(QSlider.TicksBelow)
+        self.comp_a_slider.valueChanged.connect(self.on_comp_a_change)
+        lanczos_layout.addWidget(self.comp_a_slider)
+
+        self.comp_a_label = QLabel(f"a = {self.a_value} (window = {2*self.a_value})")
+        lanczos_layout.addWidget(self.comp_a_label)
+        left_panel.addWidget(lanczos_group)
+
         left_panel.addStretch()
 
         right_panel = QVBoxLayout()
@@ -333,6 +349,7 @@ class RotateApp(QMainWindow):
 
         # update overlay and comparison
         self.update_comparison()
+
 
     # ---------- Helpers for cropping/alignment/mapping ----------
     def _center_crop(self, img, H, W):
@@ -459,14 +476,14 @@ class RotateApp(QMainWindow):
         if self.selection_rect is not None:
             x, y, w, h = self.selection_rect
             zoom_img = self.original_image[y:y+h, x:x+w].copy()
-            self.show_image_on_label(self.zoom_preview_label, zoom_img, max_size=260)
         else:
             # show centered crop as default zoom
             oh, ow = self.original_image.shape[:2]
             # choose default zoom size as ~1/3 of min dimension, clamped
             s = max(32, int(min(oh, ow) / 3))
             zoom_img = self._center_crop(self.original_image, s, s)
-            self.show_image_on_label(self.zoom_preview_label, zoom_img, max_size=260)
+
+        self.show_image_on_label(self.zoom_preview_label, zoom_img, max_size=400)
 
         # For processing: we DO NOT crop the source before calling rotation functions.
         src = self.original_image
@@ -660,6 +677,13 @@ class RotateApp(QMainWindow):
             if self.tabs.currentIndex() == 1:
                 self.update_comparison()
 
+
+    def on_comp_a_change(self, value):
+        self.a_value = value
+        self.comp_a_label.setText(f"a = {value} (window = {2*value})")
+        self.update_comparison()
+
+
     def on_slider_change(self, value):
         self.current_angle = float(value)
         self.angle_edit.setText(str(value))
@@ -709,6 +733,7 @@ class RotateApp(QMainWindow):
     def on_tab_changed(self, index):
         if index == 1 and self.original_image is not None:
             self.update_comparison()
+
 
     # ---------- Rotation pipeline for Rotator tab ----------
     def update_image(self):
