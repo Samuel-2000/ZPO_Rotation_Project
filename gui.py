@@ -1,4 +1,3 @@
-# gui.py
 import sys
 import time
 import math
@@ -14,10 +13,7 @@ import cpp_rotator.rotator_cpp as rotator
 
 
 class SelectableLabel(QLabel):
-    """QLabel that allows rectangular selection and draws it.
-    - selection_rect is in pixmap coordinates (user-drawn)
-    - overlay_selection_rect is in pixmap coordinates (for external overlay display)
-    """
+    """QLabel that allows rectangular selection and draws it."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selection_rect = None
@@ -86,17 +82,86 @@ class SelectableLabel(QLabel):
                 painter.drawRect(rect_on_label)
 
 
+class SplitImageLabel(QLabel):
+    """QLabel that draws two images side by side with a split line."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.img_left = None
+        self.img_right = None
+        self.split_pos = 50
+
+    def set_images(self, left, right):
+        self.img_left = left
+        self.img_right = right
+        self.update()
+
+    def set_split(self, pos):
+        self.split_pos = max(0, min(100, pos))
+        self.update()
+
+    def paintEvent(self, event):
+        if self.img_left is None or self.img_right is None:
+            super().paintEvent(event)
+            return
+
+        # Ensure arrays are contiguous and have correct shape
+        left = np.ascontiguousarray(self.img_left)
+        right = np.ascontiguousarray(self.img_right)
+
+        if left.ndim != 3 or left.shape[2] != 3 or right.ndim != 3 or right.shape[2] != 3:
+            super().paintEvent(event)
+            return
+
+        h_left, w_left = left.shape[:2]
+        h_right, w_right = right.shape[:2]
+
+        bytes_per_line_left = 3 * w_left
+        bytes_per_line_right = 3 * w_right
+
+        qimg_left = QImage(left.tobytes(), w_left, h_left, bytes_per_line_left, QImage.Format_RGB888)
+        qimg_right = QImage(right.tobytes(), w_right, h_right, bytes_per_line_right, QImage.Format_RGB888)
+
+        pix_left = QPixmap.fromImage(qimg_left)
+        pix_right = QPixmap.fromImage(qimg_right)
+
+        label_size = self.size()
+        scaled_left = pix_left.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_right = pix_right.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        common_size = scaled_left.size().expandedTo(scaled_right.size())
+        canvas = QPixmap(common_size)
+        canvas.fill(Qt.transparent)
+
+        painter = QPainter(canvas)
+        painter.drawPixmap(0, 0, scaled_left)
+        split_x = int(common_size.width() * self.split_pos / 100.0)
+        painter.setClipRect(split_x, 0, common_size.width() - split_x, common_size.height())
+        painter.drawPixmap(0, 0, scaled_right)
+        painter.setClipping(False)
+
+        pen = QPen(Qt.black, 2)
+        painter.setPen(pen)
+        painter.drawLine(split_x, 0, split_x, common_size.height())
+        painter.end()
+
+        final = canvas.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.setPixmap(final)
+
+
 class RotateApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Rotator")
-        self.original_image = None  # HxWx3 numpy uint8 (RGB)
+        self.original_image = None
         self.current_image = None
         self.current_angle = 0.0
-        self.zoom_mode = 'cut'  # 'cut' | 'preserve' | 'zoom_to_content'
+        self.zoom_mode = 'cut'
         self.a_value = 4
-        # selection in ORIGINAL image coordinates: (x, y, w, h) or None
         self.selection_rect = None
+
+        # Split view storage
+        self.zoom_original_region = None
+        self.zoom_transformed_regions = {}
 
         self.initUI()
 
@@ -110,12 +175,10 @@ class RotateApp(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         main_layout.addWidget(self.tabs)
 
-        # Rotator tab
         rotator_tab = QWidget()
         self.tabs.addTab(rotator_tab, "Rotator")
         self.init_rotator_tab(rotator_tab)
 
-        # Comparison tab
         comparison_tab = QWidget()
         self.tabs.addTab(comparison_tab, "Comparison")
         self.init_comparison_tab(comparison_tab)
@@ -154,7 +217,6 @@ class RotateApp(QMainWindow):
         self.a_label.setVisible(False)
         left.addWidget(self.a_label)
 
-        from PyQt5.QtWidgets import QSlider
         self.a_slider = QSlider(Qt.Horizontal)
         self.a_slider.setMinimum(1)
         self.a_slider.setMaximum(6)
@@ -214,12 +276,36 @@ class RotateApp(QMainWindow):
         left_panel.addWidget(self.orig_label)
         self.orig_label.selection_callback = self.on_user_selection_changed
 
-        # Zoom preview (unrotated) under original
-        self.zoom_preview_label = QLabel()
-        self.zoom_preview_label.setAlignment(Qt.AlignCenter)
-        self.zoom_preview_label.setMinimumSize(260, 180)
-        self.zoom_preview_label.setStyleSheet("border: 1px solid #888;")
-        left_panel.addWidget(self.zoom_preview_label)
+        # Split zoom preview
+        split_group = QGroupBox("Zoomed split comparison")
+        split_layout = QVBoxLayout(split_group)
+
+        method_layout = QHBoxLayout()
+        method_layout.addWidget(QLabel("Method:"))
+        self.split_method_combo = QComboBox()
+        self.split_method_combo.addItems([
+            'nearest_ref', 'bilinear_ref', 'lanczos_ref',
+            'nearest_manual', 'bilinear_manual', 'lanczos_manual'
+        ])
+        self.split_method_combo.currentTextChanged.connect(self.on_split_method_change)
+        method_layout.addWidget(self.split_method_combo)
+        split_layout.addLayout(method_layout)
+
+        self.split_slider = QSlider(Qt.Horizontal)
+        self.split_slider.setRange(0, 100)
+        self.split_slider.setValue(50)
+        self.split_slider.setTickInterval(10)
+        self.split_slider.setTickPosition(QSlider.TicksBelow)
+        self.split_slider.valueChanged.connect(self.on_split_slider_change)
+        split_layout.addWidget(self.split_slider)
+
+        self.split_image_label = SplitImageLabel()
+        self.split_image_label.setAlignment(Qt.AlignCenter)
+        self.split_image_label.setMinimumSize(260, 180)
+        self.split_image_label.setStyleSheet("border: 1px solid #888;")
+        split_layout.addWidget(self.split_image_label)
+
+        left_panel.addWidget(split_group)
 
         angle_group = QGroupBox("Angle")
         angle_layout = QVBoxLayout(angle_group)
@@ -243,7 +329,6 @@ class RotateApp(QMainWindow):
         self.zoom_combo_comp.currentTextChanged.connect(self.on_zoom_change)
         left_panel.addWidget(self.zoom_combo_comp)
 
-        # Lanczos a slider (Comparison tab)
         lanczos_group = QGroupBox("Lanczos a (manual)")
         lanczos_layout = QVBoxLayout(lanczos_group)
         self.comp_a_slider = QSlider(Qt.Horizontal)
@@ -272,7 +357,6 @@ class RotateApp(QMainWindow):
         ]
         self.method_cells = []
         for row, (ref_name, man_name) in enumerate(pairs):
-            # ref cell
             ref_cell = QWidget()
             ref_layout = QVBoxLayout(ref_cell)
             lbl_ref = QLabel(ref_name)
@@ -288,7 +372,6 @@ class RotateApp(QMainWindow):
             ref_layout.addWidget(ref_psnr)
             grid_layout.addWidget(ref_cell, row, 0)
 
-            # manual cell
             man_cell = QWidget()
             man_layout = QVBoxLayout(man_cell)
             lbl_man = QLabel(man_name)
@@ -314,9 +397,6 @@ class RotateApp(QMainWindow):
 
     # ---------- Selection mapping ----------
     def on_user_selection_changed(self):
-        """
-        Map SelectableLabel.selection_rect (pixmap coords) back to original-image coords and store in self.selection_rect.
-        """
         if self.original_image is None:
             self.selection_rect = None
             return
@@ -347,11 +427,9 @@ class RotateApp(QMainWindow):
 
             self.selection_rect = (x, y, w, h)
 
-        # update overlay and comparison
         self.update_comparison()
 
-
-    # ---------- Helpers for cropping/alignment/mapping ----------
+    # ---------- Helpers ----------
     def _center_crop(self, img, H, W):
         hh, ww = img.shape[:2]
         if H > hh or W > ww:
@@ -362,7 +440,6 @@ class RotateApp(QMainWindow):
         return img[sy:sy+H, sx:sx+W]
 
     def _centroid_of_mask(self, mask):
-        """Compute centroid (cx, cy) in pixel coordinates (float). mask is 2D boolean."""
         ys, xs = np.nonzero(mask)
         if xs.size == 0:
             return None
@@ -371,18 +448,12 @@ class RotateApp(QMainWindow):
         return (cx, cy)
 
     def _align_by_centroid_and_crop(self, orig, inv):
-        """
-        Align orig and inv by integer translation computed from centroids of non-black pixels,
-        then return the overlapping crops (orig_crop, inv_crop) and the origin in orig coords (orig_x0, orig_y0).
-        If centroid-based alignment fails or no overlap, fall back to center-crop to common size.
-        """
         if orig is None or inv is None:
             return None, None, 0, 0
 
         orig_h, orig_w = orig.shape[:2]
         inv_h, inv_w = inv.shape[:2]
 
-        # masks of non-black pixels
         mask_o = np.any(orig != 0, axis=2)
         mask_i = np.any(inv != 0, axis=2)
 
@@ -390,27 +461,21 @@ class RotateApp(QMainWindow):
         cent_i = self._centroid_of_mask(mask_i)
 
         if cent_o is None or cent_i is None:
-            # fallback to center crop
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
             orig_crop = self._center_crop(orig, common_h, common_w)
             inv_crop = self._center_crop(inv, common_h, common_w)
-            # origin in original coordinates (for mapping selection)
             orig_x0 = (orig_w - common_w) // 2
             orig_y0 = (orig_h - common_h) // 2
             return orig_crop, inv_crop, orig_x0, orig_y0
 
-        # compute integer shift so centroids overlap: dx = cx_orig - cx_inv, dy = cy_orig - cy_inv
         dx = int(round(cent_o[0] - cent_i[0]))
         dy = int(round(cent_o[1] - cent_i[1]))
 
-        # compute overlapping rectangle coordinates
-        # orig crop starts at ox0, inv crop starts at ix0
         ox0 = max(0, dx)
         ix0 = max(0, -dx)
         ow = min(orig_w - ox0, inv_w - ix0)
         if ow <= 0:
-            # fallback to center crop
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
             orig_crop = self._center_crop(orig, common_h, common_w)
@@ -423,7 +488,6 @@ class RotateApp(QMainWindow):
         iy0 = max(0, -dy)
         oh = min(orig_h - oy0, inv_h - iy0)
         if oh <= 0:
-            # fallback
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
             orig_crop = self._center_crop(orig, common_h, common_w)
@@ -434,24 +498,13 @@ class RotateApp(QMainWindow):
 
         orig_crop = orig[oy0:oy0+oh, ox0:ox0+ow]
         inv_crop = inv[iy0:iy0+oh, ix0:ix0+ow]
-
-        # origin of orig_crop in original coords
-        orig_x0_final = ox0
-        orig_y0_final = oy0
-
-        return orig_crop, inv_crop, orig_x0_final, orig_y0_final
+        return orig_crop, inv_crop, ox0, oy0
 
     def _map_selection_to_common_with_origin(self, sel, orig_crop_origin, common_w, common_h):
-        """
-        Map selection rectangle (x,y,w,h) in original coords to coordinates inside the common crop which
-        starts at orig_crop_origin = (orig_x0, orig_y0) in original coordinates.
-        Return (x', y', w', h') clipped, or None if no overlap.
-        """
         if sel is None:
             return None
         x, y, w, h = sel
         ox0, oy0 = orig_crop_origin
-        # relative to common origin
         rx0 = x - ox0
         ry0 = y - oy0
         ix0 = max(0, rx0)
@@ -469,23 +522,19 @@ class RotateApp(QMainWindow):
         if self.original_image is None:
             return
 
-        # Always display the full original with overlay selection
-        self.show_image_on_label(self.orig_label, self.original_image, max_size=380, selection=self.selection_rect, set_overlay=True)
+        # Show original with overlay
+        self.show_image_on_label(self.orig_label, self.original_image, max_size=380,
+                                 selection=self.selection_rect, set_overlay=True)
 
-        # update zoom preview under the original (unrotated)
+        # Set original region for split view (once, from original image)
         if self.selection_rect is not None:
             x, y, w, h = self.selection_rect
-            zoom_img = self.original_image[y:y+h, x:x+w].copy()
+            self.zoom_original_region = self.original_image[y:y+h, x:x+w].copy()
         else:
-            # show centered crop as default zoom
             oh, ow = self.original_image.shape[:2]
-            # choose default zoom size as ~1/3 of min dimension, clamped
             s = max(32, int(min(oh, ow) / 3))
-            zoom_img = self._center_crop(self.original_image, s, s)
+            self.zoom_original_region = self._center_crop(self.original_image, s, s)
 
-        self.show_image_on_label(self.zoom_preview_label, zoom_img, max_size=400)
-
-        # For processing: we DO NOT crop the source before calling rotation functions.
         src = self.original_image
         angle = float(self.current_angle)
         a = int(self.a_value)
@@ -502,19 +551,19 @@ class RotateApp(QMainWindow):
             'lanczos_manual': lambda img, ang, cut_flag: rotator.rotate_lanczos_manual(img, ang, cut_flag, a)
         }
 
+        self.zoom_transformed_regions.clear()
+
         for (ref_name, ref_img_label, ref_psnr_label, man_name, man_img_label, man_psnr_label) in self.method_cells:
             try:
                 ref_fn = method_funcs[ref_name]
                 man_fn = method_funcs[man_name]
 
-                # apply rotation -> inverse on FULL original
                 ref_rot = ref_fn(src, angle, cut)
                 ref_inv = ref_fn(ref_rot, -angle, cut)
 
                 man_rot = man_fn(src, angle, cut)
                 man_inv = man_fn(man_rot, -angle, cut)
 
-                # If zoom_to_content mode is requested, apply analytic cropping to the FINAL images (i.e., to inv images)
                 display_ref = ref_inv
                 display_man = man_inv
 
@@ -525,11 +574,9 @@ class RotateApp(QMainWindow):
                     display_ref = self._center_crop(ref_inv, ih, iw)
                     display_man = self._center_crop(man_inv, ih, iw)
 
-                # ALIGN orig and inverses by centroid and crop to overlapping region
                 orig_crop_ref, inv_crop_ref, orig_x0_ref, orig_y0_ref = self._align_by_centroid_and_crop(src, display_ref)
                 orig_crop_man, inv_crop_man, orig_x0_man, orig_y0_man = self._align_by_centroid_and_crop(src, display_man)
 
-                # compute PSNR on either selected area mapped to these common crops, or whole common crop
                 sel = self.selection_rect
 
                 sel_ref_in_common = self._map_selection_to_common_with_origin(sel, (orig_x0_ref, orig_y0_ref),
@@ -555,14 +602,11 @@ class RotateApp(QMainWindow):
                 ref_psnr_label.setText(f"PSNR: {psnr_ref:.2f} dB" if psnr_ref >= 0 else "PSNR: -- dB")
                 man_psnr_label.setText(f"PSNR: {psnr_man:.2f} dB" if psnr_man >= 0 else "PSNR: -- dB")
 
-                # For display: if user selected an area, show the corresponding region of the aligned inverse (inv_crop),
-                # otherwise show the whole aligned inv_crop.
                 def display_for_label(orig_c, inv_c, orig_origin, sel_common, label):
                     if inv_c is None:
                         label.clear()
                         return
                     if sel_common is None:
-                        # show aligned inverse (inv_c)
                         self.show_image_on_label(label, inv_c, max_size=360)
                     else:
                         x0, y0, w0, h0 = sel_common
@@ -572,18 +616,38 @@ class RotateApp(QMainWindow):
                 display_for_label(orig_crop_ref, inv_crop_ref, (orig_x0_ref, orig_y0_ref), sel_ref_in_common, ref_img_label)
                 display_for_label(orig_crop_man, inv_crop_man, (orig_x0_man, orig_y0_man), sel_man_in_common, man_img_label)
 
+                # Store transformed region for split view (only the part corresponding to selection)
+                if inv_crop_ref is not None:
+                    if sel_ref_in_common is not None:
+                        x0, y0, w0, h0 = sel_ref_in_common
+                        region = inv_crop_ref[y0:y0+h0, x0:x0+w0].copy()
+                    else:
+                        region = inv_crop_ref.copy()
+                    self.zoom_transformed_regions[ref_name] = region
+
+                if inv_crop_man is not None:
+                    if sel_man_in_common is not None:
+                        x0, y0, w0, h0 = sel_man_in_common
+                        region = inv_crop_man[y0:y0+h0, x0:x0+w0].copy()
+                    else:
+                        region = inv_crop_man.copy()
+                    self.zoom_transformed_regions[man_name] = region
+
             except Exception as e:
                 print(f"Error computing {ref_name}/{man_name}: {e}")
                 ref_psnr_label.setText("PSNR: error")
                 man_psnr_label.setText("PSNR: error")
 
+        # Update split view with current method
+        current_method = self.split_method_combo.currentText()
+        if current_method in self.zoom_transformed_regions and self.zoom_original_region is not None:
+            left = self.zoom_original_region
+            right = self.zoom_transformed_regions[current_method]
+            if left is not None and right is not None and left.size > 0 and right.size > 0:
+                self.split_image_label.set_images(left, right)
+
     # ---------- Show image helper ----------
     def show_image_on_label(self, label, img_np, max_size=120, selection=None, set_overlay=False):
-        """
-        Display numpy RGB image on QLabel.
-        If set_overlay=True and label is SelectableLabel and selection is (x,y,w,h) in ORIGINAL image coords,
-        compute corresponding QRect in pixmap coords and set label.overlay_selection_rect for display.
-        """
         if img_np is None or img_np.size == 0:
             label.clear()
             return
@@ -677,12 +741,10 @@ class RotateApp(QMainWindow):
             if self.tabs.currentIndex() == 1:
                 self.update_comparison()
 
-
     def on_comp_a_change(self, value):
         self.a_value = value
         self.comp_a_label.setText(f"a = {value} (window = {2*value})")
         self.update_comparison()
-
 
     def on_slider_change(self, value):
         self.current_angle = float(value)
@@ -734,6 +796,17 @@ class RotateApp(QMainWindow):
         if index == 1 and self.original_image is not None:
             self.update_comparison()
 
+    def on_split_method_change(self, text):
+        if self.original_image is None:
+            return
+        if text in self.zoom_transformed_regions and self.zoom_original_region is not None:
+            left = self.zoom_original_region
+            right = self.zoom_transformed_regions[text]
+            if left is not None and right is not None and left.size > 0 and right.size > 0:
+                self.split_image_label.set_images(left, right)
+
+    def on_split_slider_change(self, value):
+        self.split_image_label.set_split(value)
 
     # ---------- Rotation pipeline for Rotator tab ----------
     def update_image(self):
@@ -759,7 +832,6 @@ class RotateApp(QMainWindow):
             else:
                 return
 
-            # zoom_to_content: analytic inner rectangle based on original size & angle (crop final rotated image)
             if self.zoom_combo.currentText() == 'zoom_to_content' and rotated is not None and rotated.size != 0:
                 iw, ih = rotator.get_max_inner_rect(self.original_image.shape[1], self.original_image.shape[0], self.current_angle)
                 iw = max(1, int(iw))
