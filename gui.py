@@ -1,6 +1,6 @@
+# gui.py
 import sys
 import time
-import math
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QSlider,
                              QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout,
@@ -13,11 +13,11 @@ import cpp_rotator.rotator_cpp as rotator
 
 
 class SelectableLabel(QLabel):
-    """QLabel that allows rectangular selection and draws it."""
+    """QLabel allowing rectangular selection and drawing overlay selection_rect in pixmap coords."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.selection_rect = None
-        self.overlay_selection_rect = None
+        self.selection_rect = None                # QRect in pixmap coordinates (user-drawn)
+        self.overlay_selection_rect = None        # QRect in pixmap coordinates (externally set)
         self.rubber_band = None
         self.origin = QPoint()
         self.setMouseTracking(True)
@@ -83,85 +83,116 @@ class SelectableLabel(QLabel):
 
 
 class SplitImageLabel(QLabel):
-    """QLabel that draws two images side by side with a split line."""
+    """
+    Split preview widget: left vs right numpy images (HxWx3 uint8).
+    Builds a combined pixmap and sets it on the label. Keeps numpy refs so QImage buffer remains valid.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.img_left = None
         self.img_right = None
-        self.split_pos = 50
+        self.split_pos = 50  # percentage
+        self._left_ref = None
+        self._right_ref = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(160, 120)
 
     def set_images(self, left, right):
-        self.img_left = left
-        self.img_right = right
-        self.update()
+        # Accept None; convert to contiguous arrays if present
+        def ensure_rgb(img):
+            if img is None:
+                return None
+            img = np.ascontiguousarray(img)
+            if img.dtype != np.uint8:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            if img.ndim == 2:
+                img = np.stack([img]*3, axis=2)
+            elif img.ndim == 3 and img.shape[2] == 4:
+                img = img[:, :, :3]
+            elif img.ndim != 3 or img.shape[2] != 3:
+                return None
+            return img
+
+        self.img_left = ensure_rgb(left)
+        self.img_right = ensure_rgb(right)
+        self._left_ref = self.img_left
+        self._right_ref = self.img_right
+        # debug
+        try:
+            print("SplitImageLabel.set_images left:", None if self.img_left is None else self.img_left.shape,
+                  "right:", None if self.img_right is None else self.img_right.shape)
+        except Exception:
+            pass
+        self._build_and_set_pixmap()
 
     def set_split(self, pos):
-        self.split_pos = max(0, min(100, pos))
-        self.update()
+        self.split_pos = max(0, min(100, int(pos)))
+        self._build_and_set_pixmap()
 
-    def paintEvent(self, event):
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._build_and_set_pixmap()
+
+    def _build_and_set_pixmap(self):
         if self.img_left is None or self.img_right is None:
-            super().paintEvent(event)
+            self.clear()
             return
+        try:
+            left = self.img_left
+            right = self.img_right
 
-        # Ensure arrays are contiguous and have correct shape
-        left = np.ascontiguousarray(self.img_left)
-        right = np.ascontiguousarray(self.img_right)
+            # choose target area based on label size but preserve aspect via scaling later
+            tgt_w = max(1, self.width())
+            tgt_h = max(1, self.height())
 
-        if left.ndim != 3 or left.shape[2] != 3 or right.ndim != 3 or right.shape[2] != 3:
-            super().paintEvent(event)
-            return
+            qimg_left = QImage(left.data, left.shape[1], left.shape[0], 3 * left.shape[1], QImage.Format_RGB888)
+            qimg_right = QImage(right.data, right.shape[1], right.shape[0], 3 * right.shape[1], QImage.Format_RGB888)
 
-        h_left, w_left = left.shape[:2]
-        h_right, w_right = right.shape[:2]
+            pix_left = QPixmap.fromImage(qimg_left).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix_right = QPixmap.fromImage(qimg_right).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
-        bytes_per_line_left = 3 * w_left
-        bytes_per_line_right = 3 * w_right
+            canvas_w = max(pix_left.width(), pix_right.width())
+            canvas_h = max(pix_left.height(), pix_right.height())
+            canvas = QPixmap(canvas_w, canvas_h)
+            canvas.fill(Qt.transparent)
 
-        qimg_left = QImage(left.tobytes(), w_left, h_left, bytes_per_line_left, QImage.Format_RGB888)
-        qimg_right = QImage(right.tobytes(), w_right, h_right, bytes_per_line_right, QImage.Format_RGB888)
+            painter = QPainter(canvas)
+            painter.drawPixmap(0, 0, pix_left)
+            split_x = int(canvas_w * self.split_pos / 100.0)
+            painter.setClipRect(split_x, 0, canvas_w - split_x, canvas_h)
+            painter.drawPixmap(0, 0, pix_right)
+            painter.setClipping(False)
+            pen = QPen(Qt.black, 2)
+            painter.setPen(pen)
+            painter.drawLine(split_x, 0, split_x, canvas_h)
+            painter.end()
 
-        pix_left = QPixmap.fromImage(qimg_left)
-        pix_right = QPixmap.fromImage(qimg_right)
-
-        label_size = self.size()
-        scaled_left = pix_left.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        scaled_right = pix_right.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-        common_size = scaled_left.size().expandedTo(scaled_right.size())
-        canvas = QPixmap(common_size)
-        canvas.fill(Qt.transparent)
-
-        painter = QPainter(canvas)
-        painter.drawPixmap(0, 0, scaled_left)
-        split_x = int(common_size.width() * self.split_pos / 100.0)
-        painter.setClipRect(split_x, 0, common_size.width() - split_x, common_size.height())
-        painter.drawPixmap(0, 0, scaled_right)
-        painter.setClipping(False)
-
-        pen = QPen(Qt.black, 2)
-        painter.setPen(pen)
-        painter.drawLine(split_x, 0, split_x, common_size.height())
-        painter.end()
-
-        final = canvas.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.setPixmap(final)
+            final = canvas.scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.setPixmap(final)
+            # keep refs alive
+            self._last_pixmap = final
+            self._left_ref = left
+            self._right_ref = right
+        except Exception as e:
+            print("SplitImageLabel: error building pixmap:", e)
+            self.clear()
 
 
 class RotateApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Rotator")
-        self.original_image = None
+
+        # core state
+        self.original_image = None    # HxWx3 uint8
         self.current_image = None
         self.current_angle = 0.0
         self.zoom_mode = 'cut'
         self.a_value = 4
-        self.selection_rect = None
+        self.selection_rect = None    # (x,y,w,h) in ORIGINAL image coords
 
-        # Split view storage
-        self.zoom_original_region = None
-        self.zoom_transformed_regions = {}
+        # split preview currently-selected method
+        self.split_method = 'nearest_ref'
 
         self.initUI()
 
@@ -175,10 +206,12 @@ class RotateApp(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         main_layout.addWidget(self.tabs)
 
+        # Rotator tab
         rotator_tab = QWidget()
         self.tabs.addTab(rotator_tab, "Rotator")
         self.init_rotator_tab(rotator_tab)
 
+        # Comparison tab
         comparison_tab = QWidget()
         self.tabs.addTab(comparison_tab, "Comparison")
         self.init_comparison_tab(comparison_tab)
@@ -276,7 +309,14 @@ class RotateApp(QMainWindow):
         left_panel.addWidget(self.orig_label)
         self.orig_label.selection_callback = self.on_user_selection_changed
 
-        # Split zoom preview
+        # Zoom preview (unrotated) under original
+        self.zoom_preview_label = QLabel()
+        self.zoom_preview_label.setAlignment(Qt.AlignCenter)
+        self.zoom_preview_label.setMinimumSize(260, 180)
+        self.zoom_preview_label.setStyleSheet("border: 1px solid #888;")
+        left_panel.addWidget(self.zoom_preview_label)
+
+        # Split preview controls
         split_group = QGroupBox("Zoomed split comparison")
         split_layout = QVBoxLayout(split_group)
 
@@ -427,6 +467,7 @@ class RotateApp(QMainWindow):
 
             self.selection_rect = (x, y, w, h)
 
+        # update overlay and comparison
         self.update_comparison()
 
     # ---------- Helpers ----------
@@ -526,7 +567,7 @@ class RotateApp(QMainWindow):
         self.show_image_on_label(self.orig_label, self.original_image, max_size=380,
                                  selection=self.selection_rect, set_overlay=True)
 
-        # Set original region for split view (once, from original image)
+        # Set original region for split view (zoom left image)
         if self.selection_rect is not None:
             x, y, w, h = self.selection_rect
             self.zoom_original_region = self.original_image[y:y+h, x:x+w].copy()
@@ -551,8 +592,57 @@ class RotateApp(QMainWindow):
             'lanczos_manual': lambda img, ang, cut_flag: rotator.rotate_lanczos_manual(img, ang, cut_flag, a)
         }
 
-        self.zoom_transformed_regions.clear()
+        # ---------------------------
+        # SPLIT PREVIEW: produce twice-transformed (rotate -> inverse) image to match grid
+        # ---------------------------
+        split_method = self.split_method_combo.currentText()
+        right_img = None
+        try:
+            if split_method in method_funcs:
+                fn = method_funcs[split_method]
+                rot_img = fn(src, angle, cut)
+                inv_img = fn(rot_img, -angle, cut)
 
+                display_inv = inv_img
+                if use_zoom:
+                    iw, ih = rotator.get_max_inner_rect(src.shape[1], src.shape[0], angle)
+                    iw = max(1, int(iw))
+                    ih = max(1, int(ih))
+                    display_inv = self._center_crop(inv_img, ih, iw)
+
+                orig_crop, inv_crop, orig_x0, orig_y0 = self._align_by_centroid_and_crop(src, display_inv)
+
+                if inv_crop is None:
+                    zh, zw = self.zoom_original_region.shape[:2]
+                    right_img = np.zeros((zh, zw, 3), dtype=np.uint8)
+                else:
+                    if self.selection_rect is not None:
+                        sel_common = self._map_selection_to_common_with_origin(self.selection_rect, (orig_x0, orig_y0),
+                                                                               inv_crop.shape[1], inv_crop.shape[0])
+                        if sel_common is not None:
+                            x0, y0, w0, h0 = sel_common
+                            right_img = inv_crop[y0:y0+h0, x0:x0+w0].copy()
+                        else:
+                            zh, zw = self.zoom_original_region.shape[:2]
+                            right_img = self._center_crop(inv_crop, zh, zw)
+                    else:
+                        zh, zw = self.zoom_original_region.shape[:2]
+                        right_img = self._center_crop(inv_crop, zh, zw)
+        except Exception as e:
+            print(f"Split preview error for method {split_method}: {e}")
+            right_img = None
+
+        # Update split view widget
+        try:
+            if right_img is not None and self.zoom_original_region is not None:
+                self.split_image_label.set_images(self.zoom_original_region, right_img)
+                self.split_image_label.set_split(self.split_slider.value())
+        except Exception as e:
+            print("Error updating split preview:", e)
+
+        # ---------------------------
+        # 3x2 GRID
+        # ---------------------------
         for (ref_name, ref_img_label, ref_psnr_label, man_name, man_img_label, man_psnr_label) in self.method_cells:
             try:
                 ref_fn = method_funcs[ref_name]
@@ -616,57 +706,42 @@ class RotateApp(QMainWindow):
                 display_for_label(orig_crop_ref, inv_crop_ref, (orig_x0_ref, orig_y0_ref), sel_ref_in_common, ref_img_label)
                 display_for_label(orig_crop_man, inv_crop_man, (orig_x0_man, orig_y0_man), sel_man_in_common, man_img_label)
 
-                # Store transformed region for split view (only the part corresponding to selection)
-                if inv_crop_ref is not None:
-                    if sel_ref_in_common is not None:
-                        x0, y0, w0, h0 = sel_ref_in_common
-                        region = inv_crop_ref[y0:y0+h0, x0:x0+w0].copy()
-                    else:
-                        region = inv_crop_ref.copy()
-                    self.zoom_transformed_regions[ref_name] = region
-
-                if inv_crop_man is not None:
-                    if sel_man_in_common is not None:
-                        x0, y0, w0, h0 = sel_man_in_common
-                        region = inv_crop_man[y0:y0+h0, x0:x0+w0].copy()
-                    else:
-                        region = inv_crop_man.copy()
-                    self.zoom_transformed_regions[man_name] = region
-
             except Exception as e:
                 print(f"Error computing {ref_name}/{man_name}: {e}")
                 ref_psnr_label.setText("PSNR: error")
                 man_psnr_label.setText("PSNR: error")
 
-        # Update split view with current method
-        current_method = self.split_method_combo.currentText()
-        if current_method in self.zoom_transformed_regions and self.zoom_original_region is not None:
-            left = self.zoom_original_region
-            right = self.zoom_transformed_regions[current_method]
-            if left is not None and right is not None and left.size > 0 and right.size > 0:
-                self.split_image_label.set_images(left, right)
-
     # ---------- Show image helper ----------
     def show_image_on_label(self, label, img_np, max_size=120, selection=None, set_overlay=False):
+        """Robustly display numpy RGB image on QLabel; keeps reference to array on label to avoid GC."""
         if img_np is None or img_np.size == 0:
             label.clear()
             return
         img_np = np.ascontiguousarray(img_np)
         if img_np.dtype != np.uint8:
-            img_np = img_np.astype(np.uint8)
+            img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+
+        # Force 3 channels
+        if img_np.ndim == 2:
+            img_np = np.stack([img_np]*3, axis=2)
+        elif img_np.ndim == 3 and img_np.shape[2] == 4:
+            img_np = img_np[:, :, :3]
+        elif img_np.ndim != 3 or img_np.shape[2] != 3:
+            label.clear()
+            return
 
         h, w = img_np.shape[:2]
-        ch = img_np.shape[2] if img_np.ndim == 3 else 1
-        bytes_per_line = ch * w
-        if ch == 3:
-            qimg = QImage(img_np.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
-        else:
-            qimg = QImage(img_np.tobytes(), w, h, bytes_per_line, QImage.Format_Indexed8)
+        bytes_per_line = 3 * w
+
+        # create QImage from buffer and hold reference
+        qimg = QImage(img_np.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        label._img_ref = img_np
 
         pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(scaled)
 
+        # overlay selection if requested and label is SelectableLabel
         if isinstance(label, SelectableLabel):
             if set_overlay and (selection is not None) and (self.original_image is not None):
                 orig_h, orig_w = self.original_image.shape[:2]
@@ -691,6 +766,7 @@ class RotateApp(QMainWindow):
             return
         img = Image.open(fname).convert('RGB')
         self.original_image = np.array(img)
+        print("Loaded image:", None if self.original_image is None else (self.original_image.shape, self.original_image.dtype))
         self.current_angle = 0.0
         self.slider.setValue(0)
         self.angle_edit.setText("0")
@@ -797,16 +873,12 @@ class RotateApp(QMainWindow):
             self.update_comparison()
 
     def on_split_method_change(self, text):
-        if self.original_image is None:
-            return
-        if text in self.zoom_transformed_regions and self.zoom_original_region is not None:
-            left = self.zoom_original_region
-            right = self.zoom_transformed_regions[text]
-            if left is not None and right is not None and left.size > 0 and right.size > 0:
-                self.split_image_label.set_images(left, right)
+        self.split_method = text
+        if self.original_image is not None:
+            self.update_comparison()
 
-    def on_split_slider_change(self, value):
-        self.split_image_label.set_split(value)
+    def on_split_slider_change(self, val):
+        self.split_image_label.set_split(val)
 
     # ---------- Rotation pipeline for Rotator tab ----------
     def update_image(self):
@@ -831,6 +903,8 @@ class RotateApp(QMainWindow):
                 rotated = rotator.rotate_lanczos_manual(self.original_image, self.current_angle, cut, self.a_value)
             else:
                 return
+
+            print("Rotated image:", None if rotated is None else (rotated.shape, rotated.dtype))
 
             if self.zoom_combo.currentText() == 'zoom_to_content' and rotated is not None and rotated.size != 0:
                 iw, ih = rotator.get_max_inner_rect(self.original_image.shape[1], self.original_image.shape[0], self.current_angle)
