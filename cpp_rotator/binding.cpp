@@ -64,4 +64,20 @@ PYBIND11_MODULE(rotator_cpp, m) {
         cv::Mat dst = rotate_lanczos_manual(src, angle, cut_corners, a);
         return cv_to_numpy(dst);
     }, py::arg("img"), py::arg("angle"), py::arg("cut_corners") = true, py::arg("a") = 4);
+
+    // Crop black borders helper (kept for compatibility)
+    m.def("crop_to_content", [](py::array_t<unsigned char> img) {
+        cv::Mat src = numpy_to_cv(img);
+        cv::Mat dst = crop_to_content(src);
+        return cv_to_numpy(dst);
+    }, py::arg("img"));
+
+    // Analytical maximal inner rectangle: returns (width, height) as ints rounded
+    m.def("get_max_inner_rect", [](int w, int h, double angle_deg) {
+        double out_w = 0.0, out_h = 0.0;
+        get_max_inner_rect((double)w, (double)h, angle_deg, out_w, out_h);
+        int iw = std::max(0, (int)std::lround(out_w));
+        int ih = std::max(0, (int)std::lround(out_h));
+        return py::make_tuple(iw, ih);
+    }, py::arg("width"), py::arg("height"), py::arg("angle_deg"));
 }

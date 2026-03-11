@@ -3,30 +3,25 @@
 #include <vector>
 #include <algorithm>
 
+// ---------- PSNR ----------
 double getPSNR(const cv::Mat& I1, const cv::Mat& I2) {
-    // Skontrolujeme, či sú obrázky rovnako veľké a typu
     if (I1.size() != I2.size() || I1.type() != I2.type()) {
-        return -1.0; // chyba
+        return -1.0;
     }
-
     cv::Mat diff;
-    cv::absdiff(I1, I2, diff);               // |I1 - I2|
-    diff.convertTo(diff, CV_64F);             // prevod na double pre umocnenie
-    cv::Mat sq = diff.mul(diff);              // druhé mocniny po elementoch
-
-    cv::Scalar s = cv::sum(sq);               // súčet pre každý kanál
-    double total_pixels = I1.total() * I1.channels(); // počet všetkých hodnôt (vrátane kanálov)
-    double mse = (s[0] + s[1] + s[2]) / total_pixels; // priemerná kvadratická chyba cez všetky kanály
-
+    cv::absdiff(I1, I2, diff);
+    diff.convertTo(diff, CV_64F);
+    cv::Mat sq = diff.mul(diff);
+    cv::Scalar s = cv::sum(sq);
+    double total_pixels = I1.total() * I1.channels();
+    double mse = (s[0] + s[1] + s[2]) / total_pixels;
+    if (mse <= 1e-12) return 1e9;
     double maxVal = 255.0;
     double psnr = 10.0 * log10((maxVal * maxVal) / mse);
     return psnr;
 }
 
-
-// ==================== Pomocné funkcie pre interpoláciu ====================
-
-// Bilineárna interpolácia pre jeden bod (float súradnice)
+// ---------- Interpolation helpers (unchanged) ----------
 cv::Vec3b bilinear_interpolate(const cv::Mat& img, float x, float y) {
     int x0 = (int)std::floor(x);
     int y0 = (int)std::floor(y);
@@ -57,7 +52,6 @@ cv::Vec3b bilinear_interpolate(const cv::Mat& img, float x, float y) {
                      cv::saturate_cast<uchar>(result[2]));
 }
 
-// Lanczos kernel (a je parameter)
 static double lanczos_kernel(double x, int a) {
     if (x == 0.0) return 1.0;
     if (fabs(x) >= a) return 0.0;
@@ -65,7 +59,6 @@ static double lanczos_kernel(double x, int a) {
     return a * sin(pix) * sin(pix / a) / (pix * pix);
 }
 
-// Lanczos interpolácia pre jeden bod – s parametrom a (veľkosť jadra)
 cv::Vec3b lanczos_interpolate(const cv::Mat& img, float x, float y, int a) {
     int x0 = (int)std::floor(x);
     int y0 = (int)std::floor(y);
@@ -85,7 +78,7 @@ cv::Vec3b lanczos_interpolate(const cv::Mat& img, float x, float y, int a) {
                     accum[0] += w * pixel[0];
                     accum[1] += w * pixel[1];
                     accum[2] += w * pixel[2];
-                } // inak pixel je čierny (0,0,0) – nič nepripočítavame
+                }
                 sum_weight += w;
             }
         }
@@ -101,7 +94,7 @@ cv::Vec3b lanczos_interpolate(const cv::Mat& img, float x, float y, int a) {
     }
 }
 
-// ==================== Spoločná funkcia na výpočet bounding boxu ====================
+// ---------- compute bbox (unchanged) ----------
 void compute_bbox(const cv::Mat& src, double angle_deg, cv::Size& dst_size, cv::Point2d& translation) {
     double rad = angle_deg * CV_PI / 180.0;
     double cos_a = cos(rad);
@@ -135,8 +128,7 @@ void compute_bbox(const cv::Mat& src, double angle_deg, cv::Size& dst_size, cv::
     translation = cv::Point2d(-min_x, -min_y);
 }
 
-// ==================== Referenčné metódy (OpenCV) ====================
-
+// ---------- reference methods (OpenCV warpAffine) ----------
 cv::Mat rotate_nearest_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
     cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
     cv::Mat rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
@@ -200,17 +192,14 @@ cv::Mat rotate_lanczos_ref(const cv::Mat& src, double angle_deg, bool cut_corner
     return dst;
 }
 
-// ==================== Manuálne metódy (backward mapping) ====================
-
+// ---------- manual methods (backward mapping) ----------
 cv::Mat rotate_nearest_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
     double rad = angle_deg * CV_PI / 180.0;
-    double cos_a = cos(rad);
-    double sin_a = sin(rad);
     double cx = src.cols / 2.0;
     double cy = src.rows / 2.0;
 
     cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos_a, -sin_a, 0, sin_a, cos_a, 0, 0,0,1);
+    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
     cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
     cv::Mat M = T_back * R * T_origin;
     cv::Mat invM = M.inv(cv::DECOMP_SVD);
@@ -251,13 +240,11 @@ cv::Mat rotate_nearest_manual(const cv::Mat& src, double angle_deg, bool cut_cor
 
 cv::Mat rotate_bilinear_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
     double rad = angle_deg * CV_PI / 180.0;
-    double cos_a = cos(rad);
-    double sin_a = sin(rad);
     double cx = src.cols / 2.0;
     double cy = src.rows / 2.0;
 
     cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos_a, -sin_a, 0, sin_a, cos_a, 0, 0,0,1);
+    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
     cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
     cv::Mat M = T_back * R * T_origin;
     cv::Mat invM = M.inv(cv::DECOMP_SVD);
@@ -290,16 +277,13 @@ cv::Mat rotate_bilinear_manual(const cv::Mat& src, double angle_deg, bool cut_co
     }
 }
 
-// ==================== Optimalizovaná Lanczos s parametrom a a paralelným spracovaním ====================
 cv::Mat rotate_lanczos_manual(const cv::Mat& src, double angle_deg, bool cut_corners, int a) {
     double rad = angle_deg * CV_PI / 180.0;
-    double cos_a = cos(rad);
-    double sin_a = sin(rad);
     double cx = src.cols / 2.0;
     double cy = src.rows / 2.0;
 
     cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos_a, -sin_a, 0, sin_a, cos_a, 0, 0,0,1);
+    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
     cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
     cv::Mat M = T_back * R * T_origin;
     cv::Mat invM = M.inv(cv::DECOMP_SVD);
@@ -336,4 +320,92 @@ cv::Mat rotate_lanczos_manual(const cv::Mat& src, double angle_deg, bool cut_cor
         });
         return dst;
     }
+}
+
+// ---------- crop_to_content (scan-based - kept for compatibility) ----------
+cv::Mat crop_to_content(const cv::Mat& img) {
+    int rows = img.rows;
+    int cols = img.cols;
+    int minx = cols, miny = rows, maxx = -1, maxy = -1;
+
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            cv::Vec3b p = img.at<cv::Vec3b>(y, x);
+            if (p[0] != 0 || p[1] != 0 || p[2] != 0) {
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+        }
+    }
+
+    if (maxx < 0 || maxy < 0) {
+        return img.clone();
+    }
+
+    cv::Rect roi(minx, miny, maxx - minx + 1, maxy - miny + 1);
+    return img(roi).clone();
+}
+
+// ---------- Analytical maximal inner rectangle ----------
+// ---------- Analytical maximal inner rectangle ----------
+void get_max_inner_rect(double w, double h, double angle_deg, double &out_w, double &out_h)
+{
+    // Normalize angle
+    double angle = fmod(angle_deg, 180.0);
+    if (angle < 0) angle += 180.0;
+    if (angle > 90.0) angle = 180.0 - angle;
+
+    double theta = angle * CV_PI / 180.0;
+
+    double sin_a = fabs(sin(theta));
+    double cos_a = fabs(cos(theta));
+
+    if (sin_a == 0.0)
+    {
+        out_w = w;
+        out_h = h;
+        return;
+    }
+
+    if (cos_a == 0.0)
+    {
+        out_w = h;
+        out_h = w;
+        return;
+    }
+
+    bool width_longer = w >= h;
+
+    double side_long  = width_longer ? w : h;
+    double side_short = width_longer ? h : w;
+
+    double wr, hr;
+
+    if (side_short <= 2.0 * sin_a * cos_a * side_long)
+    {
+        double x = 0.5 * side_short;
+
+        if (width_longer)
+        {
+            wr = x / sin_a;
+            hr = x / cos_a;
+        }
+        else
+        {
+            wr = x / cos_a;
+            hr = x / sin_a;
+        }
+    }
+    else
+    {
+        double cos_2a = cos_a * cos_a - sin_a * sin_a;
+
+        wr = (w * cos_a - h * sin_a) / cos_2a;
+        hr = (h * cos_a - w * sin_a) / cos_2a;
+    }
+
+    out_w = fabs(wr);
+    out_h = fabs(hr);
 }
