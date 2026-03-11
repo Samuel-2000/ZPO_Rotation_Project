@@ -1,0 +1,1 @@
+Vypracujte funkci pro (kvalitní) rotaci rastrového obrazu o zadaný úhel. Funkci vypracujte v různých variantách (posuny řádků a sloupců, vzorkování jednoho pixelu, vzorkování s antialiasingem). Výsledky dokumentujte a demonstrujte na příkladech (na několika obrazech). 
