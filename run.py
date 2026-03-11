@@ -66,14 +66,16 @@ def install_requirements():
 def add_opencv_dll_path():
     """Pridá cestu k OpenCV DLL do vyhľadávania knižníc (Windows)."""
     if platform.system() != 'Windows':
-        return True
+        return True  # Na Linuxe/Mac sa rieši inak
     import os
     opencv_root = None
+    # Skúsime premennú prostredia
     if 'OpenCV_DIR' in os.environ:
         opencv_root = os.environ['OpenCV_DIR']
     elif 'OPENCV_DIR' in os.environ:
         opencv_root = os.environ['OPENCV_DIR']
     else:
+        # Typické cesty
         candidates = [
             r"C:\opencv\build",
             r"C:\Program Files\opencv\build",
@@ -104,17 +106,21 @@ def main():
     print(f"Platform: {platform.system()} {platform.machine()}")
     print(f"Python: {sys.version}")
 
+    # Inštalácia požiadaviek
     if not install_requirements():
         print("Continuing anyway...")
 
+    # Kontrola / kompilácia C++ modulu
     if not check_cpp_extension():
         if not build_cpp_extension():
             sys.exit(1)
+        # Po úspešnom builde pridáme cestu k DLL (Windows)
         add_opencv_dll_path()
         if not check_cpp_extension():
             print("C++ module still not available after build!")
             sys.exit(1)
 
+    # Spustenie GUI
     try:
         from PyQt5.QtWidgets import QApplication
         from gui import RotateApp

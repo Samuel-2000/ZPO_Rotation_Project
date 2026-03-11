@@ -21,6 +21,12 @@ py::array_t<unsigned char> cv_to_numpy(const cv::Mat& mat) {
 PYBIND11_MODULE(rotator_cpp, m) {
     m.doc() = "Image rotation module (C++ backend)";
 
+    m.def("psnr", [](py::array_t<unsigned char> img1, py::array_t<unsigned char> img2) {
+        cv::Mat mat1 = numpy_to_cv(img1);
+        cv::Mat mat2 = numpy_to_cv(img2);
+        return getPSNR(mat1, mat2);
+    }, "Compute PSNR between two RGB images");
+
     // Referenčné metódy (OpenCV)
     m.def("rotate_nearest_ref", [](py::array_t<unsigned char> img, double angle, bool cut_corners) {
         cv::Mat src = numpy_to_cv(img);

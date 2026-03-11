@@ -3,6 +3,27 @@
 #include <vector>
 #include <algorithm>
 
+double getPSNR(const cv::Mat& I1, const cv::Mat& I2) {
+    // Skontrolujeme, či sú obrázky rovnako veľké a typu
+    if (I1.size() != I2.size() || I1.type() != I2.type()) {
+        return -1.0; // chyba
+    }
+
+    cv::Mat diff;
+    cv::absdiff(I1, I2, diff);               // |I1 - I2|
+    diff.convertTo(diff, CV_64F);             // prevod na double pre umocnenie
+    cv::Mat sq = diff.mul(diff);              // druhé mocniny po elementoch
+
+    cv::Scalar s = cv::sum(sq);               // súčet pre každý kanál
+    double total_pixels = I1.total() * I1.channels(); // počet všetkých hodnôt (vrátane kanálov)
+    double mse = (s[0] + s[1] + s[2]) / total_pixels; // priemerná kvadratická chyba cez všetky kanály
+
+    double maxVal = 255.0;
+    double psnr = 10.0 * log10((maxVal * maxVal) / mse);
+    return psnr;
+}
+
+
 // ==================== Pomocné funkcie pre interpoláciu ====================
 
 // Bilineárna interpolácia pre jeden bod (float súradnice)
