@@ -1,15 +1,31 @@
 # gui.py
 import sys
 import time
+import os
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QSlider,
                              QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout,
                              QWidget, QFileDialog, QComboBox, QGroupBox,
-                             QGridLayout)
+                             QGridLayout, QRubberBand, QDialog, QProgressDialog)
 from PyQt5.QtCore import Qt, QRect, QPoint
 from PyQt5.QtGui import QPixmap, QImage, QDoubleValidator, QPainter, QPen
 from PIL import Image
 import cpp_rotator.rotator_cpp as rotator
+
+# Matplotlib imports
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+
+class PlotDialog(QDialog):
+    """Simple dialog to display a matplotlib figure."""
+    def __init__(self, figure, title="PSNR Plot", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QVBoxLayout(self)
+        canvas = FigureCanvas(figure)
+        layout.addWidget(canvas)
+        self.resize(800, 600)
 
 
 class SelectableLabel(QLabel):
@@ -194,7 +210,26 @@ class RotateApp(QMainWindow):
         # split preview currently-selected method
         self.split_method = 'nearest_ref'
 
+        # Caching for PSNR plots
+        self.psnr_cache = {}           # dict {method: [(angle, psnr), ...]}
+        self.cache_angles = None        # list of angles used
+        self.cache_params = {}           # {'a': a, 'cut': cut_mode}
+
+        # Mapping of method names to functions (for later use)
+        self.method_funcs = {
+            'nearest_ref': rotator.rotate_nearest_ref,
+            'bilinear_ref': rotator.rotate_bilinear_ref,
+            'lanczos_ref': rotator.rotate_lanczos_ref,
+            'nearest_manual': rotator.rotate_nearest_manual,
+            'bilinear_manual': rotator.rotate_bilinear_manual,
+            'lanczos_manual': lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, self.a_value)
+        }
+
         self.initUI()
+
+        # Auto-load lena.png if present
+        if os.path.exists("lena.png"):
+            self.load_image_file("lena.png")
 
     def initUI(self):
         main_widget = QWidget()
@@ -228,6 +263,10 @@ class RotateApp(QMainWindow):
         self.save_btn = QPushButton("Save Image")
         self.save_btn.clicked.connect(self.save_image)
         left.addWidget(self.save_btn)
+
+        self.pattern_btn = QPushButton("Generate Checkerboard (4K)")
+        self.pattern_btn.clicked.connect(self.generate_checkerboard)
+        left.addWidget(self.pattern_btn)
 
         left.addWidget(QLabel("Method:"))
         self.method_combo = QComboBox()
@@ -362,6 +401,17 @@ class RotateApp(QMainWindow):
         angle_layout.addWidget(self.comp_angle_edit)
         left_panel.addWidget(angle_group)
 
+        # PSNR analysis buttons
+        psnr_group = QGroupBox("PSNR Analysis")
+        psnr_layout = QHBoxLayout(psnr_group)
+        self.btn_psnr_line = QPushButton("PSNR vs Angle")
+        self.btn_psnr_line.clicked.connect(self.show_psnr_line_plot)
+        self.btn_psnr_box = QPushButton("Boxplot of PSNR")
+        self.btn_psnr_box.clicked.connect(self.show_psnr_boxplot)
+        psnr_layout.addWidget(self.btn_psnr_line)
+        psnr_layout.addWidget(self.btn_psnr_box)
+        left_panel.addWidget(psnr_group)
+
         left_panel.addWidget(QLabel("Zoom mode:"))
         self.zoom_combo_comp = QComboBox()
         self.zoom_combo_comp.addItems(['cut', 'preserve', 'zoom_to_content'])
@@ -407,9 +457,19 @@ class RotateApp(QMainWindow):
             ref_img.setMinimumSize(260, 240)
             ref_img.setStyleSheet("border: 1px solid gray")
             ref_layout.addWidget(ref_img)
+
+            # PSNR label with plot button for ref
+            ref_psnr_widget = QWidget()
+            ref_psnr_layout = QHBoxLayout(ref_psnr_widget)
+            ref_psnr_layout.setContentsMargins(0,0,0,0)
             ref_psnr = QLabel("PSNR: -- dB")
-            ref_psnr.setAlignment(Qt.AlignCenter)
-            ref_layout.addWidget(ref_psnr)
+            ref_psnr_btn = QPushButton("📈")
+            ref_psnr_btn.setFixedSize(24, 24)
+            ref_psnr_btn.clicked.connect(lambda checked, m=ref_name: self.show_method_line_plot(m))
+            ref_psnr_layout.addWidget(ref_psnr)
+            ref_psnr_layout.addWidget(ref_psnr_btn)
+            ref_layout.addWidget(ref_psnr_widget)
+
             grid_layout.addWidget(ref_cell, row, 0)
 
             man_cell = QWidget()
@@ -422,12 +482,23 @@ class RotateApp(QMainWindow):
             man_img.setMinimumSize(260, 240)
             man_img.setStyleSheet("border: 1px solid gray")
             man_layout.addWidget(man_img)
+
+            # PSNR label with plot button for man
+            man_psnr_widget = QWidget()
+            man_psnr_layout = QHBoxLayout(man_psnr_widget)
+            man_psnr_layout.setContentsMargins(0,0,0,0)
             man_psnr = QLabel("PSNR: -- dB")
-            man_psnr.setAlignment(Qt.AlignCenter)
-            man_layout.addWidget(man_psnr)
+            man_psnr_btn = QPushButton("📈")
+            man_psnr_btn.setFixedSize(24, 24)
+            man_psnr_btn.clicked.connect(lambda checked, m=man_name: self.show_method_line_plot(m))
+            man_psnr_layout.addWidget(man_psnr)
+            man_psnr_layout.addWidget(man_psnr_btn)
+            man_layout.addWidget(man_psnr_widget)
+
             grid_layout.addWidget(man_cell, row, 1)
 
-            self.method_cells.append((ref_name, ref_img, ref_psnr, man_name, man_img, man_psnr))
+            self.method_cells.append((ref_name, ref_img, ref_psnr, ref_psnr_btn,
+                                      man_name, man_img, man_psnr, man_psnr_btn))
 
         right_panel.addWidget(grid_group)
         right_panel.addStretch()
@@ -492,6 +563,10 @@ class RotateApp(QMainWindow):
         if orig is None or inv is None:
             return None, None, 0, 0
 
+        # If images are exactly the same shape and content, return them directly
+        if orig.shape == inv.shape and np.array_equal(orig, inv):
+            return orig, inv, 0, 0
+
         orig_h, orig_w = orig.shape[:2]
         inv_h, inv_w = inv.shape[:2]
 
@@ -501,6 +576,7 @@ class RotateApp(QMainWindow):
         cent_o = self._centroid_of_mask(mask_o)
         cent_i = self._centroid_of_mask(mask_i)
 
+        # If either mask is empty, fall back to centered crop
         if cent_o is None or cent_i is None:
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
@@ -510,8 +586,28 @@ class RotateApp(QMainWindow):
             orig_y0 = (orig_h - common_h) // 2
             return orig_crop, inv_crop, orig_x0, orig_y0
 
-        dx = int(round(cent_o[0] - cent_i[0]))
-        dy = int(round(cent_o[1] - cent_i[1]))
+        # Floating point difference
+        dx = cent_o[0] - cent_i[0]
+        dy = cent_o[1] - cent_i[1]
+
+        # If shift is less than 1.5 pixels in both directions and sizes are the same,
+        # treat as essentially aligned – return full images.
+        if abs(dx) < 1.5 and abs(dy) < 1.5 and orig.shape == inv.shape:
+            return orig, inv, 0, 0
+
+        # If shift is very small (< 0.5 px), fall back to centered crop
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            common_h = min(orig_h, inv_h)
+            common_w = min(orig_w, inv_w)
+            orig_crop = self._center_crop(orig, common_h, common_w)
+            inv_crop = self._center_crop(inv, common_h, common_w)
+            orig_x0 = (orig_w - common_w) // 2
+            orig_y0 = (orig_h - common_h) // 2
+            return orig_crop, inv_crop, orig_x0, orig_y0
+
+        # Round to integer and compute overlapping region
+        dx = int(round(dx))
+        dy = int(round(dy))
 
         ox0 = max(0, dx)
         ix0 = max(0, -dx)
@@ -643,7 +739,8 @@ class RotateApp(QMainWindow):
         # ---------------------------
         # 3x2 GRID
         # ---------------------------
-        for (ref_name, ref_img_label, ref_psnr_label, man_name, man_img_label, man_psnr_label) in self.method_cells:
+        for (ref_name, ref_img_label, ref_psnr_label, ref_btn,
+             man_name, man_img_label, man_psnr_label, man_btn) in self.method_cells:
             try:
                 ref_fn = method_funcs[ref_name]
                 man_fn = method_funcs[man_name]
@@ -759,11 +856,15 @@ class RotateApp(QMainWindow):
                 label.overlay_selection_rect = None
             label.update()
 
-    # ---------- Load / Save ----------
+    # ---------- Load / Save / Generate ----------
     def load_image(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.bmp)")
         if not fname:
             return
+        self.load_image_file(fname)
+
+    def load_image_file(self, fname):
+        """Load image from given filename and set as original."""
         img = Image.open(fname).convert('RGB')
         self.original_image = np.array(img)
         print("Loaded image:", None if self.original_image is None else (self.original_image.shape, self.original_image.dtype))
@@ -775,6 +876,7 @@ class RotateApp(QMainWindow):
         self.selection_rect = None
         self.orig_label.selection_rect = None
         self.orig_label.overlay_selection_rect = None
+        self.clear_cache()   # invalidate cache
         self.update_image()
         if self.tabs.currentIndex() == 1:
             self.update_comparison()
@@ -786,6 +888,208 @@ class RotateApp(QMainWindow):
         if fname:
             Image.fromarray(self.current_image).save(fname)
 
+    def generate_checkerboard(self):
+        """Generate 4K (3840x2160) 8‑color checkerboard pattern."""
+        width, height = 3840, 2160
+        colors = [
+            (255, 0, 0),       # red
+            (0, 255, 0),       # green
+            (0, 0, 255),       # blue
+            (0, 255, 255),     # cyan
+            (255, 0, 255),     # magenta
+            (255, 255, 0),     # yellow
+            (255, 255, 255),   # white
+            (0, 0, 0)          # black
+        ]
+        # Create array of shape (height, width, 3)
+        img = np.zeros((height, width, 3), dtype=np.uint8)
+        for y in range(height):
+            for x in range(width):
+                idx = (x + y) % 8
+                img[y, x] = colors[idx]
+        self.original_image = img
+        self.current_angle = 0.0
+        self.slider.setValue(0)
+        self.angle_edit.setText("0")
+        self.comp_slider.setValue(0)
+        self.comp_angle_edit.setText("0")
+        self.selection_rect = None
+        self.orig_label.selection_rect = None
+        self.orig_label.overlay_selection_rect = None
+        self.clear_cache()
+        self.update_image()
+        if self.tabs.currentIndex() == 1:
+            self.update_comparison()
+        print("Generated 4K checkerboard pattern")
+
+    # ---------- PSNR Cache Management ----------
+    def clear_cache(self):
+        self.psnr_cache = {}
+        self.cache_params = {}
+
+    def ensure_psnr_cache_params(self):
+        """Return current parameters that affect PSNR."""
+        return {'a': self.a_value, 'cut': self.zoom_combo_comp.currentText()}
+
+    def is_cache_valid(self):
+        """Check if cache exists and parameters match."""
+        params = self.ensure_psnr_cache_params()
+        return self.psnr_cache != {} and self.cache_params == params
+
+    def compute_psnr_for_method(self, method, angle, params):
+        src = self.original_image
+        if src is None:
+            return -1.0
+        cut = (params['cut'] == 'cut')
+        a = params['a']
+        # Choose function (lanczos_manual needs a)
+        if method == 'lanczos_manual':
+            fn = lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, a)
+        else:
+            fn = getattr(rotator, f'rotate_{method}', None)
+        if fn is None:
+            return -1.0
+        try:
+            rot = fn(src, angle, cut)
+            inv = fn(rot, -angle, cut)
+            orig_crop, inv_crop, _, _ = self._align_by_centroid_and_crop(src, inv)
+            if orig_crop is None or inv_crop is None or orig_crop.size == 0:
+                return -1.0
+            return rotator.psnr(orig_crop, inv_crop)
+        except Exception as e:
+            print(f"Error computing PSNR for {method} at {angle}: {e}")
+            return -1.0
+
+    def compute_method_cache(self, method):
+        """Compute PSNR for a single method over all angles and store in cache."""
+        params = self.ensure_psnr_cache_params()
+        angles = list(range(-180, 181, 2))          # step = 2 degrees
+        self.cache_angles = angles
+        self.cache_params = params
+
+        progress = QProgressDialog(f"Computing PSNR for {method}...", "Cancel", 0, len(angles), self)
+        progress.setWindowModality(Qt.WindowModal)
+
+        results = []
+        for i, angle in enumerate(angles):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            QApplication.processEvents()
+            val = self.compute_psnr_for_method(method, angle, params)
+            results.append((angle, val))
+
+        progress.setValue(len(angles))
+
+        if not progress.wasCanceled():
+            self.psnr_cache[method] = results
+
+    def compute_all_cache(self):
+        """Compute PSNR for all six methods over all angles and store in cache."""
+        params = self.ensure_psnr_cache_params()
+        methods = ['nearest_ref', 'nearest_manual', 'bilinear_ref', 'bilinear_manual',
+                   'lanczos_ref', 'lanczos_manual']
+        angles = list(range(-180, 181, 2))          # step = 2 degrees
+        self.cache_angles = angles
+        self.cache_params = params
+
+        progress = QProgressDialog("Computing PSNR over angles...", "Cancel", 0, len(angles), self)
+        progress.setWindowModality(Qt.WindowModal)
+
+        # Initialize cache dict
+        cache = {m: [] for m in methods}
+
+        for i, angle in enumerate(angles):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            QApplication.processEvents()
+
+            for method in methods:
+                val = self.compute_psnr_for_method(method, angle, params)
+                cache[method].append((angle, val))
+
+        progress.setValue(len(angles))
+
+        if not progress.wasCanceled():
+            self.psnr_cache = cache
+
+    def _filter_psnr_pairs(self, pairs, threshold=1000.0):
+        """Convert (angle, value) pairs to (angles, values) with huge values replaced by NaN."""
+        angles = [p[0] for p in pairs]
+        values = [p[1] if p[1] <= threshold else np.nan for p in pairs]
+        return angles, values
+
+    # ---------- Plotting Methods ----------
+    def show_psnr_line_plot(self):
+        if not self.is_cache_valid():
+            self.compute_all_cache()
+        if not self.psnr_cache:
+            return
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown']
+        for i, (method, pairs) in enumerate(self.psnr_cache.items()):
+            angles, values = self._filter_psnr_pairs(pairs)
+            ax.plot(angles, values, label=method, color=colors[i % len(colors)])
+        ax.set_xlabel("Angle (degrees)")
+        ax.set_ylabel("PSNR (dB)")
+        ax.set_title("PSNR after double rotation vs. angle")
+        ax.legend()
+        ax.grid(True)
+        dlg = PlotDialog(fig, "PSNR vs Angle", self)
+        dlg.show()
+
+    def show_method_line_plot(self, method):
+        params = self.ensure_psnr_cache_params()
+        if self.cache_params != params or method not in self.psnr_cache:
+            self.compute_method_cache(method)
+        if method not in self.psnr_cache:
+            return
+        fig = Figure(figsize=(8, 5))
+        ax = fig.add_subplot(111)
+        pairs = self.psnr_cache[method]
+        angles, values = self._filter_psnr_pairs(pairs)
+        ax.plot(angles, values, label=method)
+        ax.set_xlabel("Angle (degrees)")
+        ax.set_ylabel("PSNR (dB)")
+        ax.set_title(f"PSNR after double rotation – {method}")
+        ax.legend()
+        ax.grid(True)
+        dlg = PlotDialog(fig, f"PSNR {method}", self)
+        dlg.show()
+
+    def show_psnr_boxplot(self):
+        if not self.is_cache_valid():
+            self.compute_all_cache()
+        if not self.psnr_cache:
+            return
+        order = ['nearest_ref', 'nearest_manual', 'bilinear_ref', 'bilinear_manual',
+                 'lanczos_ref', 'lanczos_manual']
+        data = []
+        for m in order:
+            # Extract only psnr values (ignore angles) and remove huge values (>1000)
+            vals = [v for _, v in self.psnr_cache[m] if 0 <= v <= 1000]
+            data.append(vals if vals else [0])   # avoid empty boxplot
+        labels = ['nearest\nref', 'nearest\nman', 'bilinear\nref', 'bilinear\nman',
+                  'lanczos\nref', 'lanczos\nman']
+
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+        bp = ax.boxplot(data, labels=labels, patch_artist=True)
+
+        # Color pairs: ref -> lightblue, manual -> lightcoral
+        colors = ['lightblue', 'lightcoral'] * 3
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+
+        ax.set_ylabel("PSNR (dB)")
+        ax.set_title("PSNR distribution over angles (infinite values excluded)")
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+        dlg = PlotDialog(fig, "Boxplot of PSNR", self)
+        dlg.show()
+
     # ---------- UI callbacks ----------
     def on_method_change(self, text):
         self.method = text
@@ -796,6 +1100,7 @@ class RotateApp(QMainWindow):
     def on_zoom_mode_change(self, text):
         self.zoom_mode = text
         self.zoom_combo_comp.setCurrentText(text)
+        self.clear_cache()   # cut mode changed
         if self.original_image is not None:
             self.update_image()
             if self.tabs.currentIndex() == 1:
@@ -804,6 +1109,7 @@ class RotateApp(QMainWindow):
     def on_zoom_change(self, text):
         self.zoom_mode = text
         self.zoom_combo.setCurrentText(text)
+        self.clear_cache()   # cut mode changed
         if self.original_image is not None:
             self.update_comparison()
             self.update_image()
@@ -811,6 +1117,7 @@ class RotateApp(QMainWindow):
     def on_a_change(self, value):
         self.a_value = value
         self.a_value_label.setText(f"a = {value} (window = {2*value})")
+        self.clear_cache()   # a changed
         if self.original_image is not None:
             if self.method == 'lanczos_manual':
                 self.update_image()
@@ -820,6 +1127,7 @@ class RotateApp(QMainWindow):
     def on_comp_a_change(self, value):
         self.a_value = value
         self.comp_a_label.setText(f"a = {value} (window = {2*value})")
+        self.clear_cache()   # a changed
         self.update_comparison()
 
     def on_slider_change(self, value):
