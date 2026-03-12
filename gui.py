@@ -6,7 +6,8 @@ import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QSlider,
                              QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout,
                              QWidget, QFileDialog, QComboBox, QGroupBox,
-                             QGridLayout, QRubberBand, QDialog, QProgressDialog)
+                             QGridLayout, QRubberBand, QDialog, QProgressDialog,
+                             QCheckBox)
 from PyQt5.QtCore import Qt, QRect, QPoint
 from PyQt5.QtGui import QPixmap, QImage, QDoubleValidator, QPainter, QPen
 from PIL import Image
@@ -210,10 +211,13 @@ class RotateApp(QMainWindow):
         # split preview currently-selected method
         self.split_method = 'nearest_ref'
 
+        # Show/hide manual methods
+        self.show_manual = True
+
         # Caching for PSNR plots
         self.psnr_cache = {}           # dict {method: [(angle, psnr), ...]}
         self.cache_angles = None        # list of angles used
-        self.cache_params = {}           # {'a': a, 'cut': cut_mode}
+        self.cache_params = {}           # {'a': a, 'cut': cut_mode}  (selection cleared separately)
 
         # Mapping of method names to functions (for later use)
         self.method_funcs = {
@@ -264,7 +268,7 @@ class RotateApp(QMainWindow):
         self.save_btn.clicked.connect(self.save_image)
         left.addWidget(self.save_btn)
 
-        self.pattern_btn = QPushButton("Generate Checkerboard (4K)")
+        self.pattern_btn = QPushButton("Generate Checkerboard (FHD)")
         self.pattern_btn.clicked.connect(self.generate_checkerboard)
         left.addWidget(self.pattern_btn)
 
@@ -401,15 +405,23 @@ class RotateApp(QMainWindow):
         angle_layout.addWidget(self.comp_angle_edit)
         left_panel.addWidget(angle_group)
 
-        # PSNR analysis buttons
+        # PSNR analysis buttons + checkbox
         psnr_group = QGroupBox("PSNR Analysis")
-        psnr_layout = QHBoxLayout(psnr_group)
+        psnr_layout = QVBoxLayout(psnr_group)
+        btn_layout = QHBoxLayout()
         self.btn_psnr_line = QPushButton("PSNR vs Angle")
         self.btn_psnr_line.clicked.connect(self.show_psnr_line_plot)
         self.btn_psnr_box = QPushButton("Boxplot of PSNR")
         self.btn_psnr_box.clicked.connect(self.show_psnr_boxplot)
-        psnr_layout.addWidget(self.btn_psnr_line)
-        psnr_layout.addWidget(self.btn_psnr_box)
+        btn_layout.addWidget(self.btn_psnr_line)
+        btn_layout.addWidget(self.btn_psnr_box)
+        psnr_layout.addLayout(btn_layout)
+
+        self.cb_show_manual = QCheckBox("Show manual methods")
+        self.cb_show_manual.setChecked(self.show_manual)
+        self.cb_show_manual.stateChanged.connect(self.on_show_manual_toggled)
+        psnr_layout.addWidget(self.cb_show_manual)
+
         left_panel.addWidget(psnr_group)
 
         left_panel.addWidget(QLabel("Zoom mode:"))
@@ -446,6 +458,7 @@ class RotateApp(QMainWindow):
             ('lanczos_ref', 'lanczos_manual'),
         ]
         self.method_cells = []
+        self.manual_cells = []   # list of manual column widgets for show/hide
         for row, (ref_name, man_name) in enumerate(pairs):
             ref_cell = QWidget()
             ref_layout = QVBoxLayout(ref_cell)
@@ -499,12 +512,22 @@ class RotateApp(QMainWindow):
 
             self.method_cells.append((ref_name, ref_img, ref_psnr, ref_psnr_btn,
                                       man_name, man_img, man_psnr, man_psnr_btn))
+            self.manual_cells.append(man_cell)
 
         right_panel.addWidget(grid_group)
         right_panel.addStretch()
 
         main_layout.addLayout(left_panel, 1)
         main_layout.addLayout(right_panel, 2)
+
+    # ---------- Show/hide manual methods ----------
+    def on_show_manual_toggled(self, state):
+        self.show_manual = (state == Qt.Checked)
+        for cell in self.manual_cells:
+            cell.setVisible(self.show_manual)
+        self.clear_cache()   # methods set changed
+        if self.original_image is not None:
+            self.update_comparison()
 
     # ---------- Selection mapping ----------
     def on_user_selection_changed(self):
@@ -538,6 +561,8 @@ class RotateApp(QMainWindow):
 
             self.selection_rect = (x, y, w, h)
 
+        # Clear cache because PSNR now depends on selection
+        self.clear_cache()
         # update overlay and comparison
         self.update_comparison()
 
@@ -668,9 +693,7 @@ class RotateApp(QMainWindow):
             x, y, w, h = self.selection_rect
             self.zoom_original_region = self.original_image[y:y+h, x:x+w].copy()
         else:
-            oh, ow = self.original_image.shape[:2]
-            s = max(32, int(min(oh, ow) / 3))
-            self.zoom_original_region = self._center_crop(self.original_image, s, s)
+            self.zoom_original_region = self.original_image  # full image when no selection
 
         src = self.original_image
         angle = float(self.current_angle)
@@ -742,34 +765,23 @@ class RotateApp(QMainWindow):
         for (ref_name, ref_img_label, ref_psnr_label, ref_btn,
              man_name, man_img_label, man_psnr_label, man_btn) in self.method_cells:
             try:
+                # Compute reference method
                 ref_fn = method_funcs[ref_name]
-                man_fn = method_funcs[man_name]
-
                 ref_rot = ref_fn(src, angle, cut)
                 ref_inv = ref_fn(ref_rot, -angle, cut)
 
-                man_rot = man_fn(src, angle, cut)
-                man_inv = man_fn(man_rot, -angle, cut)
-
                 display_ref = ref_inv
-                display_man = man_inv
-
                 if use_zoom:
                     iw, ih = rotator.get_max_inner_rect(src.shape[1], src.shape[0], angle)
                     iw = max(1, int(iw))
                     ih = max(1, int(ih))
                     display_ref = self._center_crop(ref_inv, ih, iw)
-                    display_man = self._center_crop(man_inv, ih, iw)
 
                 orig_crop_ref, inv_crop_ref, orig_x0_ref, orig_y0_ref = self._align_by_centroid_and_crop(src, display_ref)
-                orig_crop_man, inv_crop_man, orig_x0_man, orig_y0_man = self._align_by_centroid_and_crop(src, display_man)
-
                 sel = self.selection_rect
 
                 sel_ref_in_common = self._map_selection_to_common_with_origin(sel, (orig_x0_ref, orig_y0_ref),
                                                                              inv_crop_ref.shape[1], inv_crop_ref.shape[0]) if (orig_crop_ref is not None and inv_crop_ref is not None) else None
-                sel_man_in_common = self._map_selection_to_common_with_origin(sel, (orig_x0_man, orig_y0_man),
-                                                                             inv_crop_man.shape[1], inv_crop_man.shape[0]) if (orig_crop_man is not None and inv_crop_man is not None) else None
 
                 def psnr_on_region(orig_c, inv_c, sel_common):
                     if orig_c is None or inv_c is None:
@@ -784,10 +796,7 @@ class RotateApp(QMainWindow):
                     return rotator.psnr(o_crop, i_crop)
 
                 psnr_ref = psnr_on_region(orig_crop_ref, inv_crop_ref, sel_ref_in_common)
-                psnr_man = psnr_on_region(orig_crop_man, inv_crop_man, sel_man_in_common)
-
                 ref_psnr_label.setText(f"PSNR: {psnr_ref:.2f} dB" if psnr_ref >= 0 else "PSNR: -- dB")
-                man_psnr_label.setText(f"PSNR: {psnr_man:.2f} dB" if psnr_man >= 0 else "PSNR: -- dB")
 
                 def display_for_label(orig_c, inv_c, orig_origin, sel_common, label):
                     if inv_c is None:
@@ -801,7 +810,31 @@ class RotateApp(QMainWindow):
                         self.show_image_on_label(label, img, max_size=360)
 
                 display_for_label(orig_crop_ref, inv_crop_ref, (orig_x0_ref, orig_y0_ref), sel_ref_in_common, ref_img_label)
-                display_for_label(orig_crop_man, inv_crop_man, (orig_x0_man, orig_y0_man), sel_man_in_common, man_img_label)
+
+                # Compute manual method only if enabled
+                if self.show_manual:
+                    man_fn = method_funcs[man_name]
+                    man_rot = man_fn(src, angle, cut)
+                    man_inv = man_fn(man_rot, -angle, cut)
+
+                    display_man = man_inv
+                    if use_zoom:
+                        iw, ih = rotator.get_max_inner_rect(src.shape[1], src.shape[0], angle)
+                        iw = max(1, int(iw))
+                        ih = max(1, int(ih))
+                        display_man = self._center_crop(man_inv, ih, iw)
+
+                    orig_crop_man, inv_crop_man, orig_x0_man, orig_y0_man = self._align_by_centroid_and_crop(src, display_man)
+                    sel_man_in_common = self._map_selection_to_common_with_origin(sel, (orig_x0_man, orig_y0_man),
+                                                                                 inv_crop_man.shape[1], inv_crop_man.shape[0]) if (orig_crop_man is not None and inv_crop_man is not None) else None
+
+                    psnr_man = psnr_on_region(orig_crop_man, inv_crop_man, sel_man_in_common)
+                    man_psnr_label.setText(f"PSNR: {psnr_man:.2f} dB" if psnr_man >= 0 else "PSNR: -- dB")
+                    display_for_label(orig_crop_man, inv_crop_man, (orig_x0_man, orig_y0_man), sel_man_in_common, man_img_label)
+                else:
+                    # Clear manual widgets
+                    man_psnr_label.setText("PSNR: -- dB")
+                    man_img_label.clear()
 
             except Exception as e:
                 print(f"Error computing {ref_name}/{man_name}: {e}")
@@ -889,24 +922,27 @@ class RotateApp(QMainWindow):
             Image.fromarray(self.current_image).save(fname)
 
     def generate_checkerboard(self):
-        """Generate 4K (3840x2160) 8‑color checkerboard pattern."""
-        width, height = 3840, 2160
-        colors = [
-            (255, 0, 0),       # red
-            (0, 255, 0),       # green
-            (0, 0, 255),       # blue
-            (0, 255, 255),     # cyan
-            (255, 0, 255),     # magenta
-            (255, 255, 0),     # yellow
-            (255, 255, 255),   # white
-            (0, 0, 0)          # black
-        ]
-        # Create array of shape (height, width, 3)
-        img = np.zeros((height, width, 3), dtype=np.uint8)
-        for y in range(height):
-            for x in range(width):
-                idx = (x + y) % 8
-                img[y, x] = colors[idx]
+        """Generate Full HD (1920x1080) 8‑color checkerboard pattern (fast vectorized)."""
+        width, height = 1920, 1080
+        # Define the eight contrastive colors:
+        colors = np.array([
+            [255, 0, 0],       # red
+            [0, 255, 0],       # green
+            [0, 0, 255],       # blue
+            [255, 255, 0],     # yellow
+            [0, 255, 255],     # cyan
+            [255, 0, 255],     # magenta
+            [0, 0, 0],          # black
+            [255, 255, 255]   # white
+        ], dtype=np.uint8)
+
+        # Create coordinate arrays
+        x = np.arange(width)
+        y = np.arange(height)
+        # Compute index = (x + y) % 8 for every pixel using broadcasting
+        idx = (x[np.newaxis, :] + y[:, np.newaxis]) % 8
+        # Map indices to colors (vectorized lookup)
+        img = colors[idx]
         self.original_image = img
         self.current_angle = 0.0
         self.slider.setValue(0)
@@ -920,7 +956,7 @@ class RotateApp(QMainWindow):
         self.update_image()
         if self.tabs.currentIndex() == 1:
             self.update_comparison()
-        print("Generated 4K checkerboard pattern")
+        print("Generated Full HD checkerboard pattern (vectorized)")
 
     # ---------- PSNR Cache Management ----------
     def clear_cache(self):
@@ -935,6 +971,14 @@ class RotateApp(QMainWindow):
         """Check if cache exists and parameters match."""
         params = self.ensure_psnr_cache_params()
         return self.psnr_cache != {} and self.cache_params == params
+
+    def get_methods_list(self):
+        """Return list of methods to compute based on show_manual flag."""
+        base = ['nearest_ref', 'bilinear_ref', 'lanczos_ref']
+        if self.show_manual:
+            return base + ['nearest_manual', 'bilinear_manual', 'lanczos_manual']
+        else:
+            return base
 
     def compute_psnr_for_method(self, method, angle, params):
         src = self.original_image
@@ -952,16 +996,41 @@ class RotateApp(QMainWindow):
         try:
             rot = fn(src, angle, cut)
             inv = fn(rot, -angle, cut)
-            orig_crop, inv_crop, _, _ = self._align_by_centroid_and_crop(src, inv)
+
+            # Align the double-transformed image with the original
+            orig_crop, inv_crop, ox0, oy0 = self._align_by_centroid_and_crop(src, inv)
+
             if orig_crop is None or inv_crop is None or orig_crop.size == 0:
                 return -1.0
-            return rotator.psnr(orig_crop, inv_crop)
+
+            # If a selection rectangle exists, map it to the common region
+            if self.selection_rect is not None:
+                sel_common = self._map_selection_to_common_with_origin(
+                    self.selection_rect, (ox0, oy0), inv_crop.shape[1], inv_crop.shape[0]
+                )
+                if sel_common is not None:
+                    x0, y0, w0, h0 = sel_common
+                    # Ensure region is within bounds
+                    if w0 > 0 and h0 > 0:
+                        orig_sel = orig_crop[y0:y0+h0, x0:x0+w0]
+                        inv_sel = inv_crop[y0:y0+h0, x0:x0+w0]
+                        return rotator.psnr(orig_sel, inv_sel)
+                # If selection falls completely outside common region, return -1 (invalid)
+                return -1.0
+            else:
+                # No selection: use the entire common region
+                return rotator.psnr(orig_crop, inv_crop)
         except Exception as e:
             print(f"Error computing PSNR for {method} at {angle}: {e}")
             return -1.0
 
     def compute_method_cache(self, method):
         """Compute PSNR for a single method over all angles and store in cache."""
+        # If method is manual and show_manual is False, we might still compute? Better to disallow.
+        # But this is called only when user clicks a manual plot button while manual is hidden? No, because button is hidden.
+        # Still, we add a guard.
+        if method.endswith('_manual') and not self.show_manual:
+            return   # shouldn't happen
         params = self.ensure_psnr_cache_params()
         angles = list(range(-180, 181, 2))          # step = 2 degrees
         self.cache_angles = angles
@@ -985,10 +1054,9 @@ class RotateApp(QMainWindow):
             self.psnr_cache[method] = results
 
     def compute_all_cache(self):
-        """Compute PSNR for all six methods over all angles and store in cache."""
+        """Compute PSNR for all relevant methods over all angles and store in cache."""
         params = self.ensure_psnr_cache_params()
-        methods = ['nearest_ref', 'nearest_manual', 'bilinear_ref', 'bilinear_manual',
-                   'lanczos_ref', 'lanczos_manual']
+        methods = self.get_methods_list()
         angles = list(range(-180, 181, 2))          # step = 2 degrees
         self.cache_angles = angles
         self.cache_params = params
@@ -1029,9 +1097,12 @@ class RotateApp(QMainWindow):
         fig = Figure(figsize=(10, 6))
         ax = fig.add_subplot(111)
         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown']
-        for i, (method, pairs) in enumerate(self.psnr_cache.items()):
-            angles, values = self._filter_psnr_pairs(pairs)
-            ax.plot(angles, values, label=method, color=colors[i % len(colors)])
+        methods = self.get_methods_list()
+        for i, method in enumerate(methods):
+            if method in self.psnr_cache:
+                pairs = self.psnr_cache[method]
+                angles, values = self._filter_psnr_pairs(pairs)
+                ax.plot(angles, values, label=method, color=colors[i % len(colors)])
         ax.set_xlabel("Angle (degrees)")
         ax.set_ylabel("PSNR (dB)")
         ax.set_title("PSNR after double rotation vs. angle")
@@ -1041,6 +1112,7 @@ class RotateApp(QMainWindow):
         dlg.show()
 
     def show_method_line_plot(self, method):
+        # If method is manual and show_manual is False, the button is hidden, so this shouldn't be called.
         params = self.ensure_psnr_cache_params()
         if self.cache_params != params or method not in self.psnr_cache:
             self.compute_method_cache(method)
@@ -1064,22 +1136,34 @@ class RotateApp(QMainWindow):
             self.compute_all_cache()
         if not self.psnr_cache:
             return
-        order = ['nearest_ref', 'nearest_manual', 'bilinear_ref', 'bilinear_manual',
-                 'lanczos_ref', 'lanczos_manual']
+        order = self.get_methods_list()
+        # Reorder to keep ref/manual pairs adjacent if both present
+        # But simpler: just use the order from get_methods_list
         data = []
+        labels = []
         for m in order:
             # Extract only psnr values (ignore angles) and remove huge values (>1000)
             vals = [v for _, v in self.psnr_cache[m] if 0 <= v <= 1000]
             data.append(vals if vals else [0])   # avoid empty boxplot
-        labels = ['nearest\nref', 'nearest\nman', 'bilinear\nref', 'bilinear\nman',
-                  'lanczos\nref', 'lanczos\nman']
+            # Create nice label
+            if m.endswith('_ref'):
+                base = m.replace('_ref', '')
+                labels.append(f'{base}\nref')
+            else:
+                base = m.replace('_manual', '')
+                labels.append(f'{base}\nman')
 
         fig = Figure(figsize=(10, 6))
         ax = fig.add_subplot(111)
         bp = ax.boxplot(data, labels=labels, patch_artist=True)
 
-        # Color pairs: ref -> lightblue, manual -> lightcoral
-        colors = ['lightblue', 'lightcoral'] * 3
+        # Color pairs: ref -> lightblue, manual -> lightcoral (only if both present)
+        colors = []
+        for i, m in enumerate(order):
+            if m.endswith('_ref'):
+                colors.append('lightblue')
+            else:
+                colors.append('lightcoral')
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
 
