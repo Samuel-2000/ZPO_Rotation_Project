@@ -1,0 +1,13 @@
+niekdy ostane rectangle v druhom zoome aj ked uz nic neni oznacene
+druhe zoom okno mozes dat prec, kedze uz split comparison pli tu funkciu. kazdopadne je v nom chyba, pretoze oznacuje len cast vlavo od splitu, ale ja chcem aby oznacilo vsetko, (split moze ignorovat.)
+
+
+
+
+
+unpossible:
+preco psnr 0 stupnov je iny ako 90 a 180?
+zoomed_to_content and preserve modes have ultra low psnr always, because the result is shifted/translated a little bit. make sure, that that doesnt happen. (cut is correct)
+
+
+

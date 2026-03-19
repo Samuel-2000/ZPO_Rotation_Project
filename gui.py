@@ -16,6 +16,7 @@ import cpp_rotator.rotator_cpp as rotator
 # Matplotlib imports
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.ticker as ticker
 
 
 class PlotDialog(QDialog):
@@ -30,15 +31,24 @@ class PlotDialog(QDialog):
 
 
 class SelectableLabel(QLabel):
-    """QLabel allowing rectangular selection and drawing overlay selection_rect in pixmap coords."""
+    """
+    QLabel allowing rectangular selection.
+    Stores display_region (x,y,w,h) in original image coordinates
+    that corresponds to the currently displayed image.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selection_rect = None                # QRect in pixmap coordinates (user-drawn)
         self.overlay_selection_rect = None        # QRect in pixmap coordinates (externally set)
+        self.display_region = None                 # (x, y, w, h) in original image coordinates
         self.rubber_band = None
         self.origin = QPoint()
         self.setMouseTracking(True)
         self.selection_callback = None
+
+    def set_display_region(self, region):
+        """Store the region of the original image that is being displayed."""
+        self.display_region = region
 
     def mousePressEvent(self, event):
         if self.pixmap() is None:
@@ -102,8 +112,11 @@ class SelectableLabel(QLabel):
 class SplitImageLabel(QLabel):
     """
     Split preview widget: left vs right numpy images (HxWx3 uint8).
-    Builds a combined pixmap and sets it on the label. Keeps numpy refs so QImage buffer remains valid.
+    Builds a combined pixmap and sets it on the label.
+    Allows selection on the left side only.
     """
+    selection_changed = None  # callback
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.img_left = None
@@ -111,8 +124,18 @@ class SplitImageLabel(QLabel):
         self.split_pos = 50  # percentage
         self._left_ref = None
         self._right_ref = None
+        self.selection_rect = None        # QRect in pixmap coordinates (left side only)
+        self.overlay_selection_rect = None
+        self.display_region = None         # (x, y, w, h) in original image coords for left image
+        self.rubber_band = None
+        self.origin = QPoint()
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(160, 120)
+        self.setMouseTracking(True)
+
+    def set_display_region(self, region):
+        """Store the region of the original image displayed on the left side."""
+        self.display_region = region
 
     def set_images(self, left, right):
         # Accept None; convert to contiguous arrays if present
@@ -134,12 +157,6 @@ class SplitImageLabel(QLabel):
         self.img_right = ensure_rgb(right)
         self._left_ref = self.img_left
         self._right_ref = self.img_right
-        # debug
-        try:
-            print("SplitImageLabel.set_images left:", None if self.img_left is None else self.img_left.shape,
-                  "right:", None if self.img_right is None else self.img_right.shape)
-        except Exception:
-            pass
         self._build_and_set_pixmap()
 
     def set_split(self, pos):
@@ -150,6 +167,84 @@ class SplitImageLabel(QLabel):
         super().resizeEvent(event)
         self._build_and_set_pixmap()
 
+    def mousePressEvent(self, event):
+        if self.pixmap() is None or self.img_left is None:
+            return
+        # Determine if click is on left side
+        pm = self.pixmap()
+        if pm is None:
+            return
+        label_size = self.size()
+        pix_size = pm.size()
+        x_offset = (label_size.width() - pix_size.width()) // 2
+        y_offset = (label_size.height() - pix_size.height()) // 2
+        # Transform event position to pixmap coordinates
+        pix_x = event.x() - x_offset
+        pix_y = event.y() - y_offset
+        split_x = int(pix_size.width() * self.split_pos / 100.0)
+        if pix_x < 0 or pix_x >= pix_size.width() or pix_y < 0 or pix_y >= pix_size.height():
+            return
+        if pix_x > split_x:
+            return  # click on right side, ignore
+        # Left side: start selection
+        self.origin = event.pos()
+        if self.rubber_band is None:
+            from PyQt5.QtWidgets import QRubberBand
+            self.rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+        self.rubber_band.setGeometry(QRect(self.origin, self.origin))
+        self.rubber_band.show()
+
+    def mouseMoveEvent(self, event):
+        if self.rubber_band and self.rubber_band.isVisible():
+            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+
+    def mouseReleaseEvent(self, event):
+        if self.rubber_band is None or not self.rubber_band.isVisible():
+            return
+        self.rubber_band.hide()
+        rect = self.rubber_band.geometry()
+        if rect.width() < 5 or rect.height() < 5:
+            self.selection_rect = None
+        else:
+            pm = self.pixmap()
+            if pm is None:
+                return
+            label_size = self.size()
+            pix_size = pm.size()
+            x_offset = (label_size.width() - pix_size.width()) // 2
+            y_offset = (label_size.height() - pix_size.height()) // 2
+            pix_rect = rect.translated(-x_offset, -y_offset)
+            pix_rect = pix_rect.intersected(QRect(0, 0, pix_size.width(), pix_size.height()))
+            # Restrict to left side
+            split_x = int(pix_size.width() * self.split_pos / 100.0)
+            pix_rect.setRight(min(pix_rect.right(), split_x))
+            if pix_rect.width() <= 0 or pix_rect.height() <= 0:
+                self.selection_rect = None
+            else:
+                self.selection_rect = pix_rect
+        self.update()
+        if callable(self.selection_changed):
+            try:
+                self.selection_changed()
+            except Exception:
+                pass
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        rect = self.overlay_selection_rect if self.overlay_selection_rect is not None else self.selection_rect
+        if rect is not None:
+            painter = QPainter(self)
+            pen = QPen(Qt.red, 2, Qt.SolidLine)
+            painter.setPen(pen)
+            pm = self.pixmap()
+            if pm:
+                label_size = self.size()
+                pix_size = pm.size()
+                x_offset = (label_size.width() - pix_size.width()) // 2
+                y_offset = (label_size.height() - pix_size.height()) // 2
+                rect_on_label = rect.translated(x_offset, y_offset)
+                painter.drawRect(rect_on_label)
+
     def _build_and_set_pixmap(self):
         if self.img_left is None or self.img_right is None:
             self.clear()
@@ -158,7 +253,6 @@ class SplitImageLabel(QLabel):
             left = self.img_left
             right = self.img_right
 
-            # choose target area based on label size but preserve aspect via scaling later
             tgt_w = max(1, self.width())
             tgt_h = max(1, self.height())
 
@@ -186,7 +280,6 @@ class SplitImageLabel(QLabel):
 
             final = canvas.scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.setPixmap(final)
-            # keep refs alive
             self._last_pixmap = final
             self._left_ref = left
             self._right_ref = right
@@ -214,6 +307,9 @@ class RotateApp(QMainWindow):
         # Show/hide manual methods
         self.show_manual = True
 
+        # Range limiting
+        self.limit_range = True
+
         # Caching for PSNR plots
         self.psnr_cache = {}           # dict {method: [(angle, psnr), ...]}
         self.cache_angles = None        # list of angles used
@@ -223,7 +319,7 @@ class RotateApp(QMainWindow):
         self.method_funcs = {
             'nearest_ref': rotator.rotate_nearest_ref,
             'bilinear_ref': rotator.rotate_bilinear_ref,
-            'lanczos_ref': rotator.rotate_lanczos_ref,
+            'lanczos_ref': rotator.rotate_lanczos_ref,   # fixed a=4 (OpenCV)
             'nearest_manual': rotator.rotate_nearest_manual,
             'bilinear_manual': rotator.rotate_bilinear_manual,
             'lanczos_manual': lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, self.a_value)
@@ -275,7 +371,7 @@ class RotateApp(QMainWindow):
         left.addWidget(QLabel("Method:"))
         self.method_combo = QComboBox()
         self.method_combo.addItems([
-            'nearest_ref', 'bilinear_ref', 'lanczos_ref',
+            'nearest_ref', 'bilinear_ref', 'lanczos_ref (a=4 fixed)',
             'nearest_manual', 'bilinear_manual', 'lanczos_manual'
         ])
         self.method_combo.currentTextChanged.connect(self.on_method_change)
@@ -289,7 +385,7 @@ class RotateApp(QMainWindow):
         self.zoom_combo.currentTextChanged.connect(self.on_zoom_mode_change)
         left.addWidget(self.zoom_combo)
 
-        self.a_label = QLabel("Lanczos a (kernel size):")
+        self.a_label = QLabel("Lanczos a (kernel size, manual only):")
         self.a_label.setVisible(False)
         left.addWidget(self.a_label)
 
@@ -335,7 +431,7 @@ class RotateApp(QMainWindow):
         self.update_a_visibility()
 
     def update_a_visibility(self):
-        visible = (self.method == 'lanczos_manual')
+        visible = ('lanczos_manual' in self.method)
         self.a_label.setVisible(visible)
         self.a_slider.setVisible(visible)
         self.a_value_label.setVisible(visible)
@@ -345,29 +441,36 @@ class RotateApp(QMainWindow):
         main_layout = QHBoxLayout(parent)
         left_panel = QVBoxLayout()
 
+        # Horizontal layout for original and zoom preview side by side
+        top_row = QHBoxLayout()
+
         self.orig_label = SelectableLabel()
         self.orig_label.setAlignment(Qt.AlignCenter)
         self.orig_label.setMinimumSize(380, 300)
         self.orig_label.setStyleSheet("border: 1px solid black")
-        left_panel.addWidget(self.orig_label)
-        self.orig_label.selection_callback = self.on_user_selection_changed
+        top_row.addWidget(self.orig_label)
 
-        # Zoom preview (unrotated) under original
-        self.zoom_preview_label = QLabel()
+        # Zoom preview (unrotated) - selectable
+        self.zoom_preview_label = SelectableLabel()
         self.zoom_preview_label.setAlignment(Qt.AlignCenter)
         self.zoom_preview_label.setMinimumSize(260, 180)
         self.zoom_preview_label.setStyleSheet("border: 1px solid #888;")
-        left_panel.addWidget(self.zoom_preview_label)
+        top_row.addWidget(self.zoom_preview_label)
+
+        left_panel.addLayout(top_row)
+
+        self.orig_label.selection_callback = self.on_user_selection_changed
+        self.zoom_preview_label.selection_callback = self.on_zoom_preview_selection_changed
 
         # Split preview controls
-        split_group = QGroupBox("Zoomed split comparison")
+        split_group = QGroupBox("Zoomed split comparison (select on left side)")
         split_layout = QVBoxLayout(split_group)
 
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Method:"))
         self.split_method_combo = QComboBox()
         self.split_method_combo.addItems([
-            'nearest_ref', 'bilinear_ref', 'lanczos_ref',
+            'nearest_ref', 'bilinear_ref', 'lanczos_ref (a=4 fixed)',
             'nearest_manual', 'bilinear_manual', 'lanczos_manual'
         ])
         self.split_method_combo.currentTextChanged.connect(self.on_split_method_change)
@@ -386,6 +489,7 @@ class RotateApp(QMainWindow):
         self.split_image_label.setAlignment(Qt.AlignCenter)
         self.split_image_label.setMinimumSize(260, 180)
         self.split_image_label.setStyleSheet("border: 1px solid #888;")
+        self.split_image_label.selection_changed = self.on_split_selection_changed
         split_layout.addWidget(self.split_image_label)
 
         left_panel.addWidget(split_group)
@@ -405,7 +509,7 @@ class RotateApp(QMainWindow):
         angle_layout.addWidget(self.comp_angle_edit)
         left_panel.addWidget(angle_group)
 
-        # PSNR analysis buttons + checkbox
+        # PSNR analysis buttons + checkboxes
         psnr_group = QGroupBox("PSNR Analysis")
         psnr_layout = QVBoxLayout(psnr_group)
         btn_layout = QHBoxLayout()
@@ -421,6 +525,15 @@ class RotateApp(QMainWindow):
         self.cb_show_manual.setChecked(self.show_manual)
         self.cb_show_manual.stateChanged.connect(self.on_show_manual_toggled)
         psnr_layout.addWidget(self.cb_show_manual)
+
+        self.cb_limit_range = QCheckBox("Limit angle range (0–90°, faster)")
+        self.cb_limit_range.setChecked(self.limit_range)
+        self.cb_limit_range.stateChanged.connect(self.on_limit_range_toggled)
+        self.cb_limit_range.setToolTip(
+            "When checked, only positive angles up to 90° (or 45° for square images) are computed.\n"
+            "This speeds up computation by avoiding symmetric angles."
+        )
+        psnr_layout.addWidget(self.cb_limit_range)
 
         left_panel.addWidget(psnr_group)
 
@@ -462,7 +575,10 @@ class RotateApp(QMainWindow):
         for row, (ref_name, man_name) in enumerate(pairs):
             ref_cell = QWidget()
             ref_layout = QVBoxLayout(ref_cell)
-            lbl_ref = QLabel(ref_name)
+            if ref_name == 'lanczos_ref':
+                lbl_ref = QLabel("lanczos ref (a=4)")
+            else:
+                lbl_ref = QLabel(ref_name)
             lbl_ref.setAlignment(Qt.AlignCenter)
             ref_layout.addWidget(lbl_ref)
             ref_img = QLabel()
@@ -520,17 +636,24 @@ class RotateApp(QMainWindow):
         main_layout.addLayout(left_panel, 1)
         main_layout.addLayout(right_panel, 2)
 
-    # ---------- Show/hide manual methods ----------
+    # ---------- Show/hide manual methods and range limit ----------
     def on_show_manual_toggled(self, state):
         self.show_manual = (state == Qt.Checked)
         for cell in self.manual_cells:
             cell.setVisible(self.show_manual)
-        self.clear_cache()   # methods set changed
+        self.clear_cache()
         if self.original_image is not None:
             self.update_comparison()
 
-    # ---------- Selection mapping ----------
+    def on_limit_range_toggled(self, state):
+        self.limit_range = (state == Qt.Checked)
+        self.clear_cache()
+        if self.original_image is not None:
+            print(f"Angle range limiting {'enabled' if self.limit_range else 'disabled'}")
+
+    # ---------- Selection callbacks ----------
     def on_user_selection_changed(self):
+        """Called when user draws on the original image label."""
         if self.original_image is None:
             self.selection_rect = None
             return
@@ -561,9 +684,82 @@ class RotateApp(QMainWindow):
 
             self.selection_rect = (x, y, w, h)
 
-        # Clear cache because PSNR now depends on selection
         self.clear_cache()
-        # update overlay and comparison
+        self.update_comparison()
+
+    def on_zoom_preview_selection_changed(self):
+        """Called when user draws on the zoom preview label."""
+        if self.original_image is None:
+            return
+
+        pix_rect = self.zoom_preview_label.selection_rect
+        if pix_rect is None:
+            self.selection_rect = None
+        else:
+            display_region = self.zoom_preview_label.display_region
+            if display_region is None:
+                return
+
+            pm = self.zoom_preview_label.pixmap()
+            if pm is None:
+                return
+            pix_w = pm.width()
+            pix_h = pm.height()
+
+            orig_x0, orig_y0, orig_w_disp, orig_h_disp = display_region
+
+            x = orig_x0 + int(round(pix_rect.x() * orig_w_disp / pix_w))
+            y = orig_y0 + int(round(pix_rect.y() * orig_h_disp / pix_h))
+            w = int(round(pix_rect.width() * orig_w_disp / pix_w))
+            h = int(round(pix_rect.height() * orig_h_disp / pix_h))
+
+            orig_h, orig_w = self.original_image.shape[:2]
+            x = max(0, min(x, orig_w - 1))
+            y = max(0, min(y, orig_h - 1))
+            w = max(1, min(w, orig_w - x))
+            h = max(1, min(h, orig_h - y))
+
+            self.selection_rect = (x, y, w, h)
+
+        self.clear_cache()
+        self.update_comparison()
+
+    def on_split_selection_changed(self):
+        """Called when user draws on the split image label (left side)."""
+        if self.original_image is None:
+            return
+
+        pix_rect = self.split_image_label.selection_rect
+        if pix_rect is None:
+            self.selection_rect = None
+        else:
+            display_region = self.split_image_label.display_region
+            if display_region is None:
+                return
+
+            pm = self.split_image_label.pixmap()
+            if pm is None:
+                return
+            pix_w = pm.width()
+            pix_h = pm.height()
+
+            # The left side corresponds to the zoomed original region
+            orig_x0, orig_y0, orig_w_disp, orig_h_disp = display_region
+
+            x = orig_x0 + int(round(pix_rect.x() * orig_w_disp / pix_w))
+            y = orig_y0 + int(round(pix_rect.y() * orig_h_disp / pix_h))
+            w = int(round(pix_rect.width() * orig_w_disp / pix_w))
+            h = int(round(pix_rect.height() * orig_h_disp / pix_h))
+
+            orig_h, orig_w = self.original_image.shape[:2]
+            x = max(0, min(x, orig_w - 1))
+            y = max(0, min(y, orig_h - 1))
+            w = max(1, min(w, orig_w - x))
+            h = max(1, min(h, orig_h - y))
+
+            self.selection_rect = (x, y, w, h)
+
+        self.clear_cache()
         self.update_comparison()
 
     # ---------- Helpers ----------
@@ -588,7 +784,6 @@ class RotateApp(QMainWindow):
         if orig is None or inv is None:
             return None, None, 0, 0
 
-        # If images are exactly the same shape and content, return them directly
         if orig.shape == inv.shape and np.array_equal(orig, inv):
             return orig, inv, 0, 0
 
@@ -601,7 +796,6 @@ class RotateApp(QMainWindow):
         cent_o = self._centroid_of_mask(mask_o)
         cent_i = self._centroid_of_mask(mask_i)
 
-        # If either mask is empty, fall back to centered crop
         if cent_o is None or cent_i is None:
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
@@ -611,16 +805,12 @@ class RotateApp(QMainWindow):
             orig_y0 = (orig_h - common_h) // 2
             return orig_crop, inv_crop, orig_x0, orig_y0
 
-        # Floating point difference
         dx = cent_o[0] - cent_i[0]
         dy = cent_o[1] - cent_i[1]
 
-        # If shift is less than 1.5 pixels in both directions and sizes are the same,
-        # treat as essentially aligned – return full images.
         if abs(dx) < 1.5 and abs(dy) < 1.5 and orig.shape == inv.shape:
             return orig, inv, 0, 0
 
-        # If shift is very small (< 0.5 px), fall back to centered crop
         if abs(dx) < 0.5 and abs(dy) < 0.5:
             common_h = min(orig_h, inv_h)
             common_w = min(orig_w, inv_w)
@@ -630,7 +820,6 @@ class RotateApp(QMainWindow):
             orig_y0 = (orig_h - common_h) // 2
             return orig_crop, inv_crop, orig_x0, orig_y0
 
-        # Round to integer and compute overlapping region
         dx = int(round(dx))
         dy = int(round(dy))
 
@@ -684,16 +873,27 @@ class RotateApp(QMainWindow):
         if self.original_image is None:
             return
 
+        orig_h, orig_w = self.original_image.shape[:2]
+
         # Show original with overlay
         self.show_image_on_label(self.orig_label, self.original_image, max_size=380,
-                                 selection=self.selection_rect, set_overlay=True)
+                                 selection=self.selection_rect, set_overlay=True,
+                                 display_region=(0, 0, orig_w, orig_h))
 
-        # Set original region for split view (zoom left image)
+        # Set original region for split view (zoom left image) and zoom preview
         if self.selection_rect is not None:
             x, y, w, h = self.selection_rect
             self.zoom_original_region = self.original_image[y:y+h, x:x+w].copy()
+            zoom_display_region = (x, y, w, h)
         else:
-            self.zoom_original_region = self.original_image  # full image when no selection
+            # No selection: use full original image
+            self.zoom_original_region = self.original_image
+            zoom_display_region = (0, 0, orig_w, orig_h)
+
+        # Update zoom preview (selectable) – show the same region
+        self.show_image_on_label(self.zoom_preview_label, self.zoom_original_region, max_size=260,
+                                 selection=self.selection_rect, set_overlay=True,
+                                 display_region=zoom_display_region)
 
         src = self.original_image
         angle = float(self.current_angle)
@@ -715,6 +915,8 @@ class RotateApp(QMainWindow):
         # SPLIT PREVIEW: produce twice-transformed (rotate -> inverse) image to match grid
         # ---------------------------
         split_method = self.split_method_combo.currentText()
+        if split_method == 'lanczos_ref (a=4 fixed)':
+            split_method = 'lanczos_ref'
         right_img = None
         try:
             if split_method in method_funcs:
@@ -743,7 +945,7 @@ class RotateApp(QMainWindow):
                             right_img = inv_crop[y0:y0+h0, x0:x0+w0].copy()
                         else:
                             zh, zw = self.zoom_original_region.shape[:2]
-                            right_img = self._center_crop(inv_crop, zh, zw)
+                            right_img = np.zeros((zh, zw, 3), dtype=np.uint8)
                     else:
                         zh, zw = self.zoom_original_region.shape[:2]
                         right_img = self._center_crop(inv_crop, zh, zw)
@@ -751,13 +953,40 @@ class RotateApp(QMainWindow):
             print(f"Split preview error for method {split_method}: {e}")
             right_img = None
 
-        # Update split view widget
-        try:
-            if right_img is not None and self.zoom_original_region is not None:
-                self.split_image_label.set_images(self.zoom_original_region, right_img)
-                self.split_image_label.set_split(self.split_slider.value())
-        except Exception as e:
-            print("Error updating split preview:", e)
+        # Update split view widget, storing display region for left side
+        if right_img is not None and self.zoom_original_region is not None:
+            self.split_image_label.set_images(self.zoom_original_region, right_img)
+            self.split_image_label.set_split(self.split_slider.value())
+            self.split_image_label.set_display_region(zoom_display_region)
+            # Update overlay on split image if selection exists
+            if self.selection_rect is not None:
+                # Map selection to split label coordinates (left side only)
+                ox, oy, ow, oh = zoom_display_region
+                sx, sy, sw, sh = self.selection_rect
+                inter_x0 = max(sx, ox)
+                inter_y0 = max(sy, oy)
+                inter_x1 = min(sx+sw, ox+ow)
+                inter_y1 = min(sy+sh, oy+oh)
+                if inter_x0 < inter_x1 and inter_y0 < inter_y1:
+                    disp_x = inter_x0 - ox
+                    disp_y = inter_y0 - oy
+                    disp_w = inter_x1 - inter_x0
+                    disp_h = inter_y1 - inter_y0
+                    # Scale to label coordinates
+                    label_w = self.split_image_label.pixmap().width()
+                    label_h = self.split_image_label.pixmap().height()
+                    scale_x = label_w / ow
+                    scale_y = label_h / oh
+                    label_sel_x = int(round(disp_x * scale_x))
+                    label_sel_y = int(round(disp_y * scale_y))
+                    label_sel_w = max(1, int(round(disp_w * scale_x)))
+                    label_sel_h = max(1, int(round(disp_h * scale_y)))
+                    self.split_image_label.overlay_selection_rect = QRect(label_sel_x, label_sel_y, label_sel_w, label_sel_h)
+                else:
+                    self.split_image_label.overlay_selection_rect = None
+            else:
+                self.split_image_label.overlay_selection_rect = None
+            self.split_image_label.update()
 
         # ---------------------------
         # 3x2 GRID
@@ -765,7 +994,7 @@ class RotateApp(QMainWindow):
         for (ref_name, ref_img_label, ref_psnr_label, ref_btn,
              man_name, man_img_label, man_psnr_label, man_btn) in self.method_cells:
             try:
-                # Compute reference method
+                # Reference method
                 ref_fn = method_funcs[ref_name]
                 ref_rot = ref_fn(src, angle, cut)
                 ref_inv = ref_fn(ref_rot, -angle, cut)
@@ -811,7 +1040,7 @@ class RotateApp(QMainWindow):
 
                 display_for_label(orig_crop_ref, inv_crop_ref, (orig_x0_ref, orig_y0_ref), sel_ref_in_common, ref_img_label)
 
-                # Compute manual method only if enabled
+                # Manual method only if enabled
                 if self.show_manual:
                     man_fn = method_funcs[man_name]
                     man_rot = man_fn(src, angle, cut)
@@ -832,7 +1061,6 @@ class RotateApp(QMainWindow):
                     man_psnr_label.setText(f"PSNR: {psnr_man:.2f} dB" if psnr_man >= 0 else "PSNR: -- dB")
                     display_for_label(orig_crop_man, inv_crop_man, (orig_x0_man, orig_y0_man), sel_man_in_common, man_img_label)
                 else:
-                    # Clear manual widgets
                     man_psnr_label.setText("PSNR: -- dB")
                     man_img_label.clear()
 
@@ -842,8 +1070,7 @@ class RotateApp(QMainWindow):
                 man_psnr_label.setText("PSNR: error")
 
     # ---------- Show image helper ----------
-    def show_image_on_label(self, label, img_np, max_size=120, selection=None, set_overlay=False):
-        """Robustly display numpy RGB image on QLabel; keeps reference to array on label to avoid GC."""
+    def show_image_on_label(self, label, img_np, max_size=120, selection=None, set_overlay=False, display_region=None):
         if img_np is None or img_np.size == 0:
             label.clear()
             return
@@ -851,7 +1078,6 @@ class RotateApp(QMainWindow):
         if img_np.dtype != np.uint8:
             img_np = np.clip(img_np, 0, 255).astype(np.uint8)
 
-        # Force 3 channels
         if img_np.ndim == 2:
             img_np = np.stack([img_np]*3, axis=2)
         elif img_np.ndim == 3 and img_np.shape[2] == 4:
@@ -863,7 +1089,6 @@ class RotateApp(QMainWindow):
         h, w = img_np.shape[:2]
         bytes_per_line = 3 * w
 
-        # create QImage from buffer and hold reference
         qimg = QImage(img_np.data, w, h, bytes_per_line, QImage.Format_RGB888)
         label._img_ref = img_np
 
@@ -871,20 +1096,46 @@ class RotateApp(QMainWindow):
         scaled = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(scaled)
 
-        # overlay selection if requested and label is SelectableLabel
+        if isinstance(label, SelectableLabel) and display_region is not None:
+            label.set_display_region(display_region)
+
         if isinstance(label, SelectableLabel):
             if set_overlay and (selection is not None) and (self.original_image is not None):
-                orig_h, orig_w = self.original_image.shape[:2]
-                pix_w = scaled.width()
-                pix_h = scaled.height()
-                scale_x = pix_w / orig_w
-                scale_y = pix_h / orig_h
-                orig_x, orig_y, orig_wd, orig_hd = selection
-                sel_x = int(round(orig_x * scale_x))
-                sel_y = int(round(orig_y * scale_y))
-                sel_w = max(1, int(round(orig_wd * scale_x)))
-                sel_h = max(1, int(round(orig_hd * scale_y)))
-                label.overlay_selection_rect = QRect(sel_x, sel_y, sel_w, sel_h)
+                if display_region is not None:
+                    orig_x0, orig_y0, orig_w_disp, orig_h_disp = display_region
+                    sel_x, sel_y, sel_w, sel_h = selection
+                    inter_x0 = max(sel_x, orig_x0)
+                    inter_y0 = max(sel_y, orig_y0)
+                    inter_x1 = min(sel_x + sel_w, orig_x0 + orig_w_disp)
+                    inter_y1 = min(sel_y + sel_h, orig_y0 + orig_h_disp)
+                    if inter_x0 < inter_x1 and inter_y0 < inter_y1:
+                        disp_sel_x = inter_x0 - orig_x0
+                        disp_sel_y = inter_y0 - orig_y0
+                        disp_sel_w = inter_x1 - inter_x0
+                        disp_sel_h = inter_y1 - inter_y0
+                        label_w = scaled.width()
+                        label_h = scaled.height()
+                        scale_x = label_w / orig_w_disp
+                        scale_y = label_h / orig_h_disp
+                        label_sel_x = int(round(disp_sel_x * scale_x))
+                        label_sel_y = int(round(disp_sel_y * scale_y))
+                        label_sel_w = max(1, int(round(disp_sel_w * scale_x)))
+                        label_sel_h = max(1, int(round(disp_sel_h * scale_y)))
+                        label.overlay_selection_rect = QRect(label_sel_x, label_sel_y, label_sel_w, label_sel_h)
+                    else:
+                        label.overlay_selection_rect = None
+                else:
+                    orig_h, orig_w = self.original_image.shape[:2]
+                    label_w = scaled.width()
+                    label_h = scaled.height()
+                    scale_x = label_w / orig_w
+                    scale_y = label_h / orig_h
+                    sel_x, sel_y, sel_w, sel_h = selection
+                    label_sel_x = int(round(sel_x * scale_x))
+                    label_sel_y = int(round(sel_y * scale_y))
+                    label_sel_w = max(1, int(round(sel_w * scale_x)))
+                    label_sel_h = max(1, int(round(sel_h * scale_y)))
+                    label.overlay_selection_rect = QRect(label_sel_x, label_sel_y, label_sel_w, label_sel_h)
             else:
                 label.overlay_selection_rect = None
             label.update()
@@ -897,7 +1148,6 @@ class RotateApp(QMainWindow):
         self.load_image_file(fname)
 
     def load_image_file(self, fname):
-        """Load image from given filename and set as original."""
         img = Image.open(fname).convert('RGB')
         self.original_image = np.array(img)
         print("Loaded image:", None if self.original_image is None else (self.original_image.shape, self.original_image.dtype))
@@ -908,8 +1158,12 @@ class RotateApp(QMainWindow):
         self.comp_angle_edit.setText("0")
         self.selection_rect = None
         self.orig_label.selection_rect = None
+        self.zoom_preview_label.selection_rect = None
+        self.split_image_label.selection_rect = None
         self.orig_label.overlay_selection_rect = None
-        self.clear_cache()   # invalidate cache
+        self.zoom_preview_label.overlay_selection_rect = None
+        self.split_image_label.overlay_selection_rect = None
+        self.clear_cache()
         self.update_image()
         if self.tabs.currentIndex() == 1:
             self.update_comparison()
@@ -922,9 +1176,7 @@ class RotateApp(QMainWindow):
             Image.fromarray(self.current_image).save(fname)
 
     def generate_checkerboard(self):
-        """Generate Full HD (1920x1080) 8‑color checkerboard pattern (fast vectorized)."""
         width, height = 1920, 1080
-        # Define the eight contrastive colors:
         colors = np.array([
             [255, 0, 0],       # red
             [0, 255, 0],       # green
@@ -932,16 +1184,13 @@ class RotateApp(QMainWindow):
             [255, 255, 0],     # yellow
             [0, 255, 255],     # cyan
             [255, 0, 255],     # magenta
-            [0, 0, 0],          # black
-            [255, 255, 255]   # white
+            [0, 0, 0],         # black
+            [255, 255, 255]    # white
         ], dtype=np.uint8)
 
-        # Create coordinate arrays
         x = np.arange(width)
         y = np.arange(height)
-        # Compute index = (x + y) % 8 for every pixel using broadcasting
         idx = (x[np.newaxis, :] + y[:, np.newaxis]) % 8
-        # Map indices to colors (vectorized lookup)
         img = colors[idx]
         self.original_image = img
         self.current_angle = 0.0
@@ -951,12 +1200,16 @@ class RotateApp(QMainWindow):
         self.comp_angle_edit.setText("0")
         self.selection_rect = None
         self.orig_label.selection_rect = None
+        self.zoom_preview_label.selection_rect = None
+        self.split_image_label.selection_rect = None
         self.orig_label.overlay_selection_rect = None
+        self.zoom_preview_label.overlay_selection_rect = None
+        self.split_image_label.overlay_selection_rect = None
         self.clear_cache()
         self.update_image()
         if self.tabs.currentIndex() == 1:
             self.update_comparison()
-        print("Generated Full HD checkerboard pattern (vectorized)")
+        print("Generated Full HD checkerboard pattern")
 
     # ---------- PSNR Cache Management ----------
     def clear_cache(self):
@@ -964,21 +1217,27 @@ class RotateApp(QMainWindow):
         self.cache_params = {}
 
     def ensure_psnr_cache_params(self):
-        """Return current parameters that affect PSNR."""
         return {'a': self.a_value, 'cut': self.zoom_combo_comp.currentText()}
 
     def is_cache_valid(self):
-        """Check if cache exists and parameters match."""
         params = self.ensure_psnr_cache_params()
         return self.psnr_cache != {} and self.cache_params == params
 
     def get_methods_list(self):
-        """Return list of methods to compute based on show_manual flag."""
         base = ['nearest_ref', 'bilinear_ref', 'lanczos_ref']
         if self.show_manual:
             return base + ['nearest_manual', 'bilinear_manual', 'lanczos_manual']
         else:
             return base
+
+    def get_angle_range(self):
+        if self.limit_range:
+            h, w = self.original_image.shape[:2] if self.original_image is not None else (0, 0)
+            is_square = (h == w) and h > 0
+            max_angle = 45 if is_square else 90
+            return list(range(0, max_angle + 1, 2))
+        else:
+            return list(range(-180, 181, 2))
 
     def compute_psnr_for_method(self, method, angle, params):
         src = self.original_image
@@ -986,7 +1245,6 @@ class RotateApp(QMainWindow):
             return -1.0
         cut = (params['cut'] == 'cut')
         a = params['a']
-        # Choose function (lanczos_manual needs a)
         if method == 'lanczos_manual':
             fn = lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, a)
         else:
@@ -996,43 +1254,31 @@ class RotateApp(QMainWindow):
         try:
             rot = fn(src, angle, cut)
             inv = fn(rot, -angle, cut)
-
-            # Align the double-transformed image with the original
             orig_crop, inv_crop, ox0, oy0 = self._align_by_centroid_and_crop(src, inv)
-
             if orig_crop is None or inv_crop is None or orig_crop.size == 0:
                 return -1.0
-
-            # If a selection rectangle exists, map it to the common region
             if self.selection_rect is not None:
                 sel_common = self._map_selection_to_common_with_origin(
                     self.selection_rect, (ox0, oy0), inv_crop.shape[1], inv_crop.shape[0]
                 )
                 if sel_common is not None:
                     x0, y0, w0, h0 = sel_common
-                    # Ensure region is within bounds
                     if w0 > 0 and h0 > 0:
                         orig_sel = orig_crop[y0:y0+h0, x0:x0+w0]
                         inv_sel = inv_crop[y0:y0+h0, x0:x0+w0]
                         return rotator.psnr(orig_sel, inv_sel)
-                # If selection falls completely outside common region, return -1 (invalid)
                 return -1.0
             else:
-                # No selection: use the entire common region
                 return rotator.psnr(orig_crop, inv_crop)
         except Exception as e:
             print(f"Error computing PSNR for {method} at {angle}: {e}")
             return -1.0
 
     def compute_method_cache(self, method):
-        """Compute PSNR for a single method over all angles and store in cache."""
-        # If method is manual and show_manual is False, we might still compute? Better to disallow.
-        # But this is called only when user clicks a manual plot button while manual is hidden? No, because button is hidden.
-        # Still, we add a guard.
         if method.endswith('_manual') and not self.show_manual:
-            return   # shouldn't happen
+            return
         params = self.ensure_psnr_cache_params()
-        angles = list(range(-180, 181, 2))          # step = 2 degrees
+        angles = self.get_angle_range()
         self.cache_angles = angles
         self.cache_params = params
 
@@ -1049,41 +1295,34 @@ class RotateApp(QMainWindow):
             results.append((angle, val))
 
         progress.setValue(len(angles))
-
         if not progress.wasCanceled():
             self.psnr_cache[method] = results
 
     def compute_all_cache(self):
-        """Compute PSNR for all relevant methods over all angles and store in cache."""
         params = self.ensure_psnr_cache_params()
         methods = self.get_methods_list()
-        angles = list(range(-180, 181, 2))          # step = 2 degrees
+        angles = self.get_angle_range()
         self.cache_angles = angles
         self.cache_params = params
 
         progress = QProgressDialog("Computing PSNR over angles...", "Cancel", 0, len(angles), self)
         progress.setWindowModality(Qt.WindowModal)
 
-        # Initialize cache dict
         cache = {m: [] for m in methods}
-
         for i, angle in enumerate(angles):
             if progress.wasCanceled():
                 break
             progress.setValue(i)
             QApplication.processEvents()
-
             for method in methods:
                 val = self.compute_psnr_for_method(method, angle, params)
                 cache[method].append((angle, val))
 
         progress.setValue(len(angles))
-
         if not progress.wasCanceled():
             self.psnr_cache = cache
 
     def _filter_psnr_pairs(self, pairs, threshold=1000.0):
-        """Convert (angle, value) pairs to (angles, values) with huge values replaced by NaN."""
         angles = [p[0] for p in pairs]
         values = [p[1] if p[1] <= threshold else np.nan for p in pairs]
         return angles, values
@@ -1098,21 +1337,34 @@ class RotateApp(QMainWindow):
         ax = fig.add_subplot(111)
         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown']
         methods = self.get_methods_list()
+        all_angles = []
+        for method in methods:
+            if method in self.psnr_cache:
+                pairs = self.psnr_cache[method]
+                all_angles.extend([p[0] for p in pairs])
+        if all_angles:
+            min_angle = min(all_angles)
+            max_angle = max(all_angles)
+            margin = (max_angle - min_angle) * 0.05
+            ax.set_xlim(min_angle - margin, max_angle + margin)
+
         for i, method in enumerate(methods):
             if method in self.psnr_cache:
                 pairs = self.psnr_cache[method]
                 angles, values = self._filter_psnr_pairs(pairs)
-                ax.plot(angles, values, label=method, color=colors[i % len(colors)])
+                ax.plot(angles, values, label=method, color=colors[i % len(colors)], marker='.', linestyle='-')
+
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(45))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(15))
         ax.set_xlabel("Angle (degrees)")
         ax.set_ylabel("PSNR (dB)")
         ax.set_title("PSNR after double rotation vs. angle")
         ax.legend()
-        ax.grid(True)
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         dlg = PlotDialog(fig, "PSNR vs Angle", self)
         dlg.show()
 
     def show_method_line_plot(self, method):
-        # If method is manual and show_manual is False, the button is hidden, so this shouldn't be called.
         params = self.ensure_psnr_cache_params()
         if self.cache_params != params or method not in self.psnr_cache:
             self.compute_method_cache(method)
@@ -1122,12 +1374,21 @@ class RotateApp(QMainWindow):
         ax = fig.add_subplot(111)
         pairs = self.psnr_cache[method]
         angles, values = self._filter_psnr_pairs(pairs)
-        ax.plot(angles, values, label=method)
+        ax.plot(angles, values, label=method, marker='.', linestyle='-')
+
+        if angles:
+            min_angle = min(angles)
+            max_angle = max(angles)
+            margin = (max_angle - min_angle) * 0.05
+            ax.set_xlim(min_angle - margin, max_angle + margin)
+
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(45))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(15))
         ax.set_xlabel("Angle (degrees)")
         ax.set_ylabel("PSNR (dB)")
         ax.set_title(f"PSNR after double rotation – {method}")
         ax.legend()
-        ax.grid(True)
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         dlg = PlotDialog(fig, f"PSNR {method}", self)
         dlg.show()
 
@@ -1137,18 +1398,17 @@ class RotateApp(QMainWindow):
         if not self.psnr_cache:
             return
         order = self.get_methods_list()
-        # Reorder to keep ref/manual pairs adjacent if both present
-        # But simpler: just use the order from get_methods_list
         data = []
         labels = []
         for m in order:
-            # Extract only psnr values (ignore angles) and remove huge values (>1000)
             vals = [v for _, v in self.psnr_cache[m] if 0 <= v <= 1000]
-            data.append(vals if vals else [0])   # avoid empty boxplot
-            # Create nice label
+            data.append(vals if vals else [0])
             if m.endswith('_ref'):
                 base = m.replace('_ref', '')
-                labels.append(f'{base}\nref')
+                if base == 'lanczos':
+                    labels.append('Lanczos ref\n(a=4)')
+                else:
+                    labels.append(f'{base}\nref')
             else:
                 base = m.replace('_manual', '')
                 labels.append(f'{base}\nman')
@@ -1157,7 +1417,6 @@ class RotateApp(QMainWindow):
         ax = fig.add_subplot(111)
         bp = ax.boxplot(data, labels=labels, patch_artist=True)
 
-        # Color pairs: ref -> lightblue, manual -> lightcoral (only if both present)
         colors = []
         for i, m in enumerate(order):
             if m.endswith('_ref'):
@@ -1170,7 +1429,6 @@ class RotateApp(QMainWindow):
         ax.set_ylabel("PSNR (dB)")
         ax.set_title("PSNR distribution over angles (infinite values excluded)")
         ax.grid(axis='y', linestyle='--', alpha=0.7)
-
         dlg = PlotDialog(fig, "Boxplot of PSNR", self)
         dlg.show()
 
@@ -1183,8 +1441,11 @@ class RotateApp(QMainWindow):
 
     def on_zoom_mode_change(self, text):
         self.zoom_mode = text
+        # Update comparison combo, block signals to avoid triggering update_comparison
+        self.zoom_combo_comp.blockSignals(True)
         self.zoom_combo_comp.setCurrentText(text)
-        self.clear_cache()   # cut mode changed
+        self.zoom_combo_comp.blockSignals(False)
+        self.clear_cache()
         if self.original_image is not None:
             self.update_image()
             if self.tabs.currentIndex() == 1:
@@ -1193,7 +1454,7 @@ class RotateApp(QMainWindow):
     def on_zoom_change(self, text):
         self.zoom_mode = text
         self.zoom_combo.setCurrentText(text)
-        self.clear_cache()   # cut mode changed
+        self.clear_cache()
         if self.original_image is not None:
             self.update_comparison()
             self.update_image()
@@ -1201,7 +1462,12 @@ class RotateApp(QMainWindow):
     def on_a_change(self, value):
         self.a_value = value
         self.a_value_label.setText(f"a = {value} (window = {2*value})")
-        self.clear_cache()   # a changed
+        # Update comparison slider, block signals
+        self.comp_a_slider.blockSignals(True)
+        self.comp_a_slider.setValue(value)
+        self.comp_a_slider.blockSignals(False)
+        self.comp_a_label.setText(f"a = {value} (window = {2*value})")
+        self.clear_cache()
         if self.original_image is not None:
             if self.method == 'lanczos_manual':
                 self.update_image()
@@ -1211,7 +1477,7 @@ class RotateApp(QMainWindow):
     def on_comp_a_change(self, value):
         self.a_value = value
         self.comp_a_label.setText(f"a = {value} (window = {2*value})")
-        self.clear_cache()   # a changed
+        self.clear_cache()
         self.update_comparison()
 
     def on_slider_change(self, value):
@@ -1219,9 +1485,12 @@ class RotateApp(QMainWindow):
         self.angle_edit.setText(str(value))
         if self.original_image is not None:
             self.update_image()
+        # Update comparison controls without emitting signals
+        self.comp_slider.blockSignals(True)
+        self.comp_slider.setValue(value)
+        self.comp_slider.blockSignals(False)
+        self.comp_angle_edit.setText(str(value))
         if self.tabs.currentIndex() == 1:
-            self.comp_slider.setValue(value)
-            self.comp_angle_edit.setText(str(value))
             self.update_comparison()
 
     def on_angle_edit(self):
@@ -1232,9 +1501,11 @@ class RotateApp(QMainWindow):
             self.slider.setValue(int(round(angle)))
             if self.original_image is not None:
                 self.update_image()
+            self.comp_slider.blockSignals(True)
+            self.comp_slider.setValue(int(round(angle)))
+            self.comp_slider.blockSignals(False)
+            self.comp_angle_edit.setText(str(angle))
             if self.tabs.currentIndex() == 1:
-                self.comp_slider.setValue(int(round(angle)))
-                self.comp_angle_edit.setText(str(angle))
                 self.update_comparison()
         except Exception:
             pass
@@ -1280,7 +1551,9 @@ class RotateApp(QMainWindow):
         start_time = time.perf_counter()
         try:
             cut = (self.zoom_combo.currentText() == 'cut')
-            method = self.method
+            method = self.method_combo.currentText()
+            if method == 'lanczos_ref (a=4 fixed)':
+                method = 'lanczos_ref'
             if method == 'nearest_ref':
                 rotated = rotator.rotate_nearest_ref(self.original_image, self.current_angle, cut)
             elif method == 'bilinear_ref':
