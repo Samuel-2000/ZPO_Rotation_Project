@@ -113,7 +113,7 @@ class SplitImageLabel(QLabel):
     """
     Split preview widget: left vs right numpy images (HxWx3 uint8).
     Builds a combined pixmap and sets it on the label.
-    Allows selection on the left side only.
+    Selection can be drawn on the entire widget (split line is ignored for overlays).
     """
     selection_changed = None  # callback
 
@@ -124,8 +124,8 @@ class SplitImageLabel(QLabel):
         self.split_pos = 50  # percentage
         self._left_ref = None
         self._right_ref = None
-        self.selection_rect = None        # QRect in pixmap coordinates (left side only)
-        self.overlay_selection_rect = None
+        self.selection_rect = None        # QRect in pixmap coordinates (user-drawn)
+        self.overlay_selection_rect = None  # QRect in pixmap coordinates (externally set, left side only)
         self.display_region = None         # (x, y, w, h) in original image coords for left image
         self.rubber_band = None
         self.origin = QPoint()
@@ -170,23 +170,7 @@ class SplitImageLabel(QLabel):
     def mousePressEvent(self, event):
         if self.pixmap() is None or self.img_left is None:
             return
-        # Determine if click is on left side
-        pm = self.pixmap()
-        if pm is None:
-            return
-        label_size = self.size()
-        pix_size = pm.size()
-        x_offset = (label_size.width() - pix_size.width()) // 2
-        y_offset = (label_size.height() - pix_size.height()) // 2
-        # Transform event position to pixmap coordinates
-        pix_x = event.x() - x_offset
-        pix_y = event.y() - y_offset
-        split_x = int(pix_size.width() * self.split_pos / 100.0)
-        if pix_x < 0 or pix_x >= pix_size.width() or pix_y < 0 or pix_y >= pix_size.height():
-            return
-        if pix_x > split_x:
-            return  # click on right side, ignore
-        # Left side: start selection
+        # Allow selection anywhere on the label (split line is ignored)
         self.origin = event.pos()
         if self.rubber_band is None:
             from PyQt5.QtWidgets import QRubberBand
@@ -215,9 +199,6 @@ class SplitImageLabel(QLabel):
             y_offset = (label_size.height() - pix_size.height()) // 2
             pix_rect = rect.translated(-x_offset, -y_offset)
             pix_rect = pix_rect.intersected(QRect(0, 0, pix_size.width(), pix_size.height()))
-            # Restrict to left side
-            split_x = int(pix_size.width() * self.split_pos / 100.0)
-            pix_rect.setRight(min(pix_rect.right(), split_x))
             if pix_rect.width() <= 0 or pix_rect.height() <= 0:
                 self.selection_rect = None
             else:
@@ -231,19 +212,38 @@ class SplitImageLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        rect = self.overlay_selection_rect if self.overlay_selection_rect is not None else self.selection_rect
-        if rect is not None:
-            painter = QPainter(self)
-            pen = QPen(Qt.red, 2, Qt.SolidLine)
-            painter.setPen(pen)
+
+        # Draw user selection or overlay selection
+        if self.overlay_selection_rect is not None:
+            # Draw on left half and also duplicate on right half
+            self._draw_rectangle(self.overlay_selection_rect)
+            # Compute rectangle for right half: same dimensions, shifted by split_x
             pm = self.pixmap()
-            if pm:
-                label_size = self.size()
+            if pm is not None:
                 pix_size = pm.size()
-                x_offset = (label_size.width() - pix_size.width()) // 2
-                y_offset = (label_size.height() - pix_size.height()) // 2
-                rect_on_label = rect.translated(x_offset, y_offset)
-                painter.drawRect(rect_on_label)
+                split_x = int(pix_size.width() * self.split_pos / 100.0)
+                if self.overlay_selection_rect.x() < split_x:
+                    # Only duplicate if the rect is within left half (it should be)
+                    right_rect = QRect(self.overlay_selection_rect.x() + split_x,
+                                       self.overlay_selection_rect.y(),
+                                       self.overlay_selection_rect.width(),
+                                       self.overlay_selection_rect.height())
+                    self._draw_rectangle(right_rect)
+        elif self.selection_rect is not None:
+            self._draw_rectangle(self.selection_rect)
+
+    def _draw_rectangle(self, rect):
+        painter = QPainter(self)
+        pen = QPen(Qt.red, 2, Qt.SolidLine)
+        painter.setPen(pen)
+        pm = self.pixmap()
+        if pm:
+            label_size = self.size()
+            pix_size = pm.size()
+            x_offset = (label_size.width() - pix_size.width()) // 2
+            y_offset = (label_size.height() - pix_size.height()) // 2
+            rect_on_label = rect.translated(x_offset, y_offset)
+            painter.drawRect(rect_on_label)
 
     def _build_and_set_pixmap(self):
         if self.img_left is None or self.img_right is None:
@@ -441,26 +441,13 @@ class RotateApp(QMainWindow):
         main_layout = QHBoxLayout(parent)
         left_panel = QVBoxLayout()
 
-        # Horizontal layout for original and zoom preview side by side
-        top_row = QHBoxLayout()
-
+        # Original image (selectable)
         self.orig_label = SelectableLabel()
         self.orig_label.setAlignment(Qt.AlignCenter)
         self.orig_label.setMinimumSize(380, 300)
         self.orig_label.setStyleSheet("border: 1px solid black")
-        top_row.addWidget(self.orig_label)
-
-        # Zoom preview (unrotated) - selectable
-        self.zoom_preview_label = SelectableLabel()
-        self.zoom_preview_label.setAlignment(Qt.AlignCenter)
-        self.zoom_preview_label.setMinimumSize(260, 180)
-        self.zoom_preview_label.setStyleSheet("border: 1px solid #888;")
-        top_row.addWidget(self.zoom_preview_label)
-
-        left_panel.addLayout(top_row)
-
+        left_panel.addWidget(self.orig_label)
         self.orig_label.selection_callback = self.on_user_selection_changed
-        self.zoom_preview_label.selection_callback = self.on_zoom_preview_selection_changed
 
         # Split preview controls
         split_group = QGroupBox("Zoomed split comparison (select on left side)")
@@ -687,45 +674,8 @@ class RotateApp(QMainWindow):
         self.clear_cache()
         self.update_comparison()
 
-    def on_zoom_preview_selection_changed(self):
-        """Called when user draws on the zoom preview label."""
-        if self.original_image is None:
-            return
-
-        pix_rect = self.zoom_preview_label.selection_rect
-        if pix_rect is None:
-            self.selection_rect = None
-        else:
-            display_region = self.zoom_preview_label.display_region
-            if display_region is None:
-                return
-
-            pm = self.zoom_preview_label.pixmap()
-            if pm is None:
-                return
-            pix_w = pm.width()
-            pix_h = pm.height()
-
-            orig_x0, orig_y0, orig_w_disp, orig_h_disp = display_region
-
-            x = orig_x0 + int(round(pix_rect.x() * orig_w_disp / pix_w))
-            y = orig_y0 + int(round(pix_rect.y() * orig_h_disp / pix_h))
-            w = int(round(pix_rect.width() * orig_w_disp / pix_w))
-            h = int(round(pix_rect.height() * orig_h_disp / pix_h))
-
-            orig_h, orig_w = self.original_image.shape[:2]
-            x = max(0, min(x, orig_w - 1))
-            y = max(0, min(y, orig_h - 1))
-            w = max(1, min(w, orig_w - x))
-            h = max(1, min(h, orig_h - y))
-
-            self.selection_rect = (x, y, w, h)
-
-        self.clear_cache()
-        self.update_comparison()
-
     def on_split_selection_changed(self):
-        """Called when user draws on the split image label (left side)."""
+        """Called when user draws on the split image label (left side only)."""
         if self.original_image is None:
             return
 
@@ -880,7 +830,7 @@ class RotateApp(QMainWindow):
                                  selection=self.selection_rect, set_overlay=True,
                                  display_region=(0, 0, orig_w, orig_h))
 
-        # Set original region for split view (zoom left image) and zoom preview
+        # Set original region for split view (zoom left image)
         if self.selection_rect is not None:
             x, y, w, h = self.selection_rect
             self.zoom_original_region = self.original_image[y:y+h, x:x+w].copy()
@@ -889,11 +839,6 @@ class RotateApp(QMainWindow):
             # No selection: use full original image
             self.zoom_original_region = self.original_image
             zoom_display_region = (0, 0, orig_w, orig_h)
-
-        # Update zoom preview (selectable) – show the same region
-        self.show_image_on_label(self.zoom_preview_label, self.zoom_original_region, max_size=260,
-                                 selection=self.selection_rect, set_overlay=True,
-                                 display_region=zoom_display_region)
 
         src = self.original_image
         angle = float(self.current_angle)
@@ -1158,10 +1103,8 @@ class RotateApp(QMainWindow):
         self.comp_angle_edit.setText("0")
         self.selection_rect = None
         self.orig_label.selection_rect = None
-        self.zoom_preview_label.selection_rect = None
         self.split_image_label.selection_rect = None
         self.orig_label.overlay_selection_rect = None
-        self.zoom_preview_label.overlay_selection_rect = None
         self.split_image_label.overlay_selection_rect = None
         self.clear_cache()
         self.update_image()
@@ -1200,10 +1143,8 @@ class RotateApp(QMainWindow):
         self.comp_angle_edit.setText("0")
         self.selection_rect = None
         self.orig_label.selection_rect = None
-        self.zoom_preview_label.selection_rect = None
         self.split_image_label.selection_rect = None
         self.orig_label.overlay_selection_rect = None
-        self.zoom_preview_label.overlay_selection_rect = None
         self.split_image_label.overlay_selection_rect = None
         self.clear_cache()
         self.update_image()
