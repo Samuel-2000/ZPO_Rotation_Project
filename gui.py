@@ -212,7 +212,7 @@ class SplitImageLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-
+        """
         # Draw user selection or overlay selection
         if self.overlay_selection_rect is not None:
             # Draw on left half and also duplicate on right half
@@ -231,6 +231,7 @@ class SplitImageLabel(QLabel):
                     self._draw_rectangle(right_rect)
         elif self.selection_rect is not None:
             self._draw_rectangle(self.selection_rect)
+        """
 
     def _draw_rectangle(self, rect):
         painter = QPainter(self)
@@ -259,8 +260,8 @@ class SplitImageLabel(QLabel):
             qimg_left = QImage(left.data, left.shape[1], left.shape[0], 3 * left.shape[1], QImage.Format_RGB888)
             qimg_right = QImage(right.data, right.shape[1], right.shape[0], 3 * right.shape[1], QImage.Format_RGB888)
 
-            pix_left = QPixmap.fromImage(qimg_left).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            pix_right = QPixmap.fromImage(qimg_right).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix_left = QPixmap.fromImage(qimg_left).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.FastTransformation)
+            pix_right = QPixmap.fromImage(qimg_right).scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.FastTransformation)
 
             canvas_w = max(pix_left.width(), pix_right.width())
             canvas_h = max(pix_left.height(), pix_right.height())
@@ -278,7 +279,7 @@ class SplitImageLabel(QLabel):
             painter.drawLine(split_x, 0, split_x, canvas_h)
             painter.end()
 
-            final = canvas.scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            final = canvas.scaled(tgt_w, tgt_h, Qt.KeepAspectRatio, Qt.FastTransformation)
             self.setPixmap(final)
             self._last_pixmap = final
             self._left_ref = left
@@ -1038,7 +1039,7 @@ class RotateApp(QMainWindow):
         label._img_ref = img_np
 
         pixmap = QPixmap.fromImage(qimg)
-        scaled = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.FastTransformation)
         label.setPixmap(scaled)
 
         if isinstance(label, SelectableLabel) and display_region is not None:
