@@ -514,7 +514,7 @@ class RotateApp(QMainWindow):
         self.cb_show_manual.stateChanged.connect(self.on_show_manual_toggled)
         psnr_layout.addWidget(self.cb_show_manual)
 
-        self.cb_limit_range = QCheckBox("Limit angle range (0–90°, faster)")
+        self.cb_limit_range = QCheckBox("Limit angle range (45° square, 90° rectangle)")
         self.cb_limit_range.setChecked(self.limit_range)
         self.cb_limit_range.stateChanged.connect(self.on_limit_range_toggled)
         self.cb_limit_range.setToolTip(
@@ -966,8 +966,8 @@ class RotateApp(QMainWindow):
                     x0, y0, w0, h0 = sel_common
                     if w0 <= 0 or h0 <= 0:
                         return -1.0
-                    o_crop = orig_c[y0:y0+h0, x0:x0+w0]
-                    i_crop = inv_c[y0:y0+h0, x0:x0+w0]
+                    o_crop = orig_c[y0:y0+h0, x0:x0+w0].copy()   # make contiguous
+                    i_crop = inv_c[y0:y0+h0, x0:x0+w0].copy()   # make contiguous
                     return rotator.psnr(o_crop, i_crop)
 
                 psnr_ref = psnr_on_region(orig_crop_ref, inv_crop_ref, sel_ref_in_common)
@@ -1206,12 +1206,14 @@ class RotateApp(QMainWindow):
                 if sel_common is not None:
                     x0, y0, w0, h0 = sel_common
                     if w0 > 0 and h0 > 0:
-                        orig_sel = orig_crop[y0:y0+h0, x0:x0+w0]
-                        inv_sel = inv_crop[y0:y0+h0, x0:x0+w0]
+                        # Make contiguous copies before passing to C++
+                        orig_sel = orig_crop[y0:y0+h0, x0:x0+w0].copy()
+                        inv_sel = inv_crop[y0:y0+h0, x0:x0+w0].copy()
                         return rotator.psnr(orig_sel, inv_sel)
                 return -1.0
             else:
-                return rotator.psnr(orig_crop, inv_crop)
+                # No selection: use whole aligned images, but ensure they are contiguous
+                return rotator.psnr(orig_crop.copy(), inv_crop.copy())
         except Exception as e:
             print(f"Error computing PSNR for {method} at {angle}: {e}")
             return -1.0
