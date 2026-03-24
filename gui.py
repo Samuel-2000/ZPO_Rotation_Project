@@ -1177,9 +1177,9 @@ class RotateApp(QMainWindow):
             h, w = self.original_image.shape[:2] if self.original_image is not None else (0, 0)
             is_square = (h == w) and h > 0
             max_angle = 45 if is_square else 90
-            return list(range(0, max_angle + 1, 2))
+            return list(range(0, max_angle + 1))
         else:
-            return list(range(-180, 181, 2))
+            return list(range(-180, 181))
 
     def compute_psnr_for_method(self, method, angle, params):
         src = self.original_image
