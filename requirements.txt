@@ -1,3 +1,6 @@
 PyQt5>=5.15
 numpy>=1.21
 Pillow>=9.0
+pybind11
+matplotlib
+setuptools
