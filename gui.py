@@ -1174,9 +1174,9 @@ class RotateApp(QMainWindow):
 
     def get_angle_range(self):
         if self.limit_range:
-            h, w = self.original_image.shape[:2] if self.original_image is not None else (0, 0)
-            is_square = (h == w) and h > 0
-            max_angle = 45 if is_square else 90
+            #h, w = self.original_image.shape[:2] if self.original_image is not None else (0, 0)
+            #is_square = (h == w) and h > 0
+            max_angle = 45# if is_square else 90
             return list(range(0, max_angle + 1))
         else:
             return list(range(-180, 181))
