@@ -219,26 +219,6 @@ class SplitImageLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        """
-        # Draw user selection or overlay selection
-        if self.overlay_selection_rect is not None:
-            # Draw on left half and also duplicate on right half
-            self._draw_rectangle(self.overlay_selection_rect)
-            # Compute rectangle for right half: same dimensions, shifted by split_x
-            pm = self.pixmap()
-            if pm is not None:
-                pix_size = pm.size()
-                split_x = int(pix_size.width() * self.split_pos / 100.0)
-                if self.overlay_selection_rect.x() < split_x:
-                    # Only duplicate if the rect is within left half (it should be)
-                    right_rect = QRect(self.overlay_selection_rect.x() + split_x,
-                                       self.overlay_selection_rect.y(),
-                                       self.overlay_selection_rect.width(),
-                                       self.overlay_selection_rect.height())
-                    self._draw_rectangle(right_rect)
-        elif self.selection_rect is not None:
-            self._draw_rectangle(self.selection_rect)
-        """
 
     def _draw_rectangle(self, rect):
         painter = QPainter(self)
