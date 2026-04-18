@@ -15,18 +15,26 @@ import cpp_rotator.rotator_cpp as rotator
 
 # Matplotlib imports
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 import matplotlib.ticker as ticker
 
 
 class PlotDialog(QDialog):
-    """Simple dialog to display a matplotlib figure."""
+    """Simple dialog to display a matplotlib figure with a navigation toolbar."""
     def __init__(self, figure, title="PSNR Plot", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.figure = figure
         layout = QVBoxLayout(self)
-        canvas = FigureCanvas(figure)
-        layout.addWidget(canvas)
+
+        self.canvas = FigureCanvas(figure)
+        layout.addWidget(self.canvas)
+
+        # Add the standard matplotlib toolbar (includes save, zoom, pan, etc.)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        layout.addWidget(self.toolbar)
+
         self.resize(800, 600)
 
 
@@ -299,6 +307,7 @@ class RotationApp(QMainWindow):
         self.current_angle = 0.0
         self.zoom_mode = 'cut'
         self.a_value = 4
+        self.bicubic_sharpness = -0.75   # default OpenCV value
         self.selection_rect = None    # (x,y,w,h) in ORIGINAL image coords
 
         # split preview currently-selected method
@@ -313,7 +322,7 @@ class RotationApp(QMainWindow):
         # Caching for PSNR plots
         self.psnr_cache = {}           # dict {method: [(angle, psnr), ...]}
         self.cache_angles = None        # list of angles used
-        self.cache_params = {}           # {'a': a, 'cut': cut_mode}  (selection cleared separately)
+        self.cache_params = {}           # {'a': a, 'cut': cut_mode, 'bicubic_sharpness': sharpness}
 
         # Mapping of method names to functions (for later use)
         self.method_funcs = {
@@ -323,7 +332,7 @@ class RotationApp(QMainWindow):
             'lanczos_ref': rotator.rotate_lanczos_ref,
             'nearest_manual': rotator.rotate_nearest_manual,
             'bilinear_manual': rotator.rotate_bilinear_manual,
-            'bicubic_manual': rotator.rotate_bicubic_manual,
+            'bicubic_manual': lambda img, ang, cut: rotator.rotate_bicubic_manual(img, ang, cut, self.bicubic_sharpness),
             'lanczos_manual': lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, self.a_value)
         }
 
@@ -387,6 +396,7 @@ class RotationApp(QMainWindow):
         self.zoom_combo.currentTextChanged.connect(self.on_zoom_mode_change)
         left.addWidget(self.zoom_combo)
 
+        # Lanczos a
         self.a_label = QLabel("Lanczos a (kernel size, manual only):")
         self.a_label.setVisible(False)
         left.addWidget(self.a_label)
@@ -404,6 +414,25 @@ class RotationApp(QMainWindow):
         self.a_value_label = QLabel(f"a = {self.a_value} (window = {2*self.a_value})")
         self.a_value_label.setVisible(False)
         left.addWidget(self.a_value_label)
+
+        # Bicubic sharpness
+        self.bicubic_label = QLabel("Bicubic sharpness A (manual only):")
+        self.bicubic_label.setVisible(False)
+        left.addWidget(self.bicubic_label)
+
+        self.bicubic_slider = QSlider(Qt.Horizontal)
+        self.bicubic_slider.setMinimum(-100)   # -1.00
+        self.bicubic_slider.setMaximum(-50)    # -0.50
+        self.bicubic_slider.setValue(int(self.bicubic_sharpness * 100))
+        self.bicubic_slider.setTickInterval(5)
+        self.bicubic_slider.setTickPosition(QSlider.TicksBelow)
+        self.bicubic_slider.valueChanged.connect(self.on_bicubic_sharpness_change)
+        self.bicubic_slider.setVisible(False)
+        left.addWidget(self.bicubic_slider)
+
+        self.bicubic_value_label = QLabel(f"Sharpness A = {self.bicubic_sharpness:.2f}")
+        self.bicubic_value_label.setVisible(False)
+        left.addWidget(self.bicubic_value_label)
 
         left.addWidget(QLabel("Angle:"))
         self.slider = QSlider(Qt.Horizontal)
@@ -430,13 +459,19 @@ class RotationApp(QMainWindow):
         layout.addLayout(left, 1)
         layout.addWidget(self.image_label, 4)
 
-        self.update_a_visibility()
+        self.update_parameter_visibility()
 
-    def update_a_visibility(self):
-        visible = ('lanczos_manual' in self.method)
-        self.a_label.setVisible(visible)
-        self.a_slider.setVisible(visible)
-        self.a_value_label.setVisible(visible)
+    def update_parameter_visibility(self):
+        method = self.method_combo.currentText()
+        show_lanczos = ('lanczos_manual' in method)
+        self.a_label.setVisible(show_lanczos)
+        self.a_slider.setVisible(show_lanczos)
+        self.a_value_label.setVisible(show_lanczos)
+
+        show_bicubic = ('bicubic_manual' in method)
+        self.bicubic_label.setVisible(show_bicubic)
+        self.bicubic_slider.setVisible(show_bicubic)
+        self.bicubic_value_label.setVisible(show_bicubic)
 
     # ---------- Comparison tab ----------
     def init_comparison_tab(self, parent):
@@ -533,6 +568,7 @@ class RotationApp(QMainWindow):
         self.zoom_combo_comp.currentTextChanged.connect(self.on_zoom_change)
         left_panel.addWidget(self.zoom_combo_comp)
 
+        # Lanczos a group
         lanczos_group = QGroupBox("Lanczos a (manual)")
         lanczos_layout = QVBoxLayout(lanczos_group)
         self.comp_a_slider = QSlider(Qt.Horizontal)
@@ -547,6 +583,22 @@ class RotationApp(QMainWindow):
         self.comp_a_label = QLabel(f"a = {self.a_value} (window = {2*self.a_value})")
         lanczos_layout.addWidget(self.comp_a_label)
         left_panel.addWidget(lanczos_group)
+
+        # Bicubic sharpness group
+        bicubic_group = QGroupBox("Bicubic sharpness A (manual)")
+        bicubic_layout = QVBoxLayout(bicubic_group)
+        self.comp_bicubic_slider = QSlider(Qt.Horizontal)
+        self.comp_bicubic_slider.setMinimum(-100)
+        self.comp_bicubic_slider.setMaximum(-50)
+        self.comp_bicubic_slider.setValue(int(self.bicubic_sharpness * 100))
+        self.comp_bicubic_slider.setTickInterval(5)
+        self.comp_bicubic_slider.setTickPosition(QSlider.TicksBelow)
+        self.comp_bicubic_slider.valueChanged.connect(self.on_comp_bicubic_sharpness_change)
+        bicubic_layout.addWidget(self.comp_bicubic_slider)
+
+        self.comp_bicubic_label = QLabel(f"Sharpness A = {self.bicubic_sharpness:.2f}")
+        bicubic_layout.addWidget(self.comp_bicubic_label)
+        left_panel.addWidget(bicubic_group)
 
         left_panel.addStretch()
 
@@ -846,6 +898,7 @@ class RotationApp(QMainWindow):
         src = self.original_image
         angle = float(self.current_angle)
         a = int(self.a_value)
+        sharpness = self.bicubic_sharpness
         zoom_mode = self.zoom_combo_comp.currentText()
         cut = (zoom_mode == 'cut')
         use_zoom = (zoom_mode == 'zoom_to_content')
@@ -857,7 +910,7 @@ class RotationApp(QMainWindow):
             'lanczos_ref': rotator.rotate_lanczos_ref,
             'nearest_manual': rotator.rotate_nearest_manual,
             'bilinear_manual': rotator.rotate_bilinear_manual,
-            'bicubic_manual': rotator.rotate_bicubic_manual,
+            'bicubic_manual': lambda img, ang, cut_flag: rotator.rotate_bicubic_manual(img, ang, cut_flag, sharpness),
             'lanczos_manual': lambda img, ang, cut_flag: rotator.rotate_lanczos_manual(img, ang, cut_flag, a)
         }
 
@@ -867,7 +920,7 @@ class RotationApp(QMainWindow):
         split_method = self.split_method_combo.currentText()
         if split_method == 'lanczos_ref (a=4 fixed)':
             split_method = 'lanczos_ref'
-        elif split_method == 'bicubic_ref (a=4 fixed)':  # just in case
+        elif split_method == 'bicubic_ref (a=4 fixed)':   # just in case
             split_method = 'bicubic_ref'
         right_img = None
         try:
@@ -1165,7 +1218,7 @@ class RotationApp(QMainWindow):
         self.cache_params = {}
 
     def ensure_psnr_cache_params(self):
-        return {'a': self.a_value, 'cut': self.zoom_combo_comp.currentText()}
+        return {'a': self.a_value, 'cut': self.zoom_combo_comp.currentText(), 'bicubic_sharpness': self.bicubic_sharpness}
 
     def is_cache_valid(self):
         params = self.ensure_psnr_cache_params()
@@ -1180,9 +1233,7 @@ class RotationApp(QMainWindow):
 
     def get_angle_range(self):
         if self.limit_range:
-            #h, w = self.original_image.shape[:2] if self.original_image is not None else (0, 0)
-            #is_square = (h == w) and h > 0
-            max_angle = 45# if is_square else 90
+            max_angle = 45
             return list(range(0, max_angle + 1))
         else:
             return list(range(-180, 181))
@@ -1193,10 +1244,11 @@ class RotationApp(QMainWindow):
             return -1.0
         cut = (params['cut'] == 'cut')
         a = params['a']
+        sharpness = params['bicubic_sharpness']
         if method == 'lanczos_manual':
             fn = lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, a)
         elif method == 'bicubic_manual':
-            fn = rotator.rotate_bicubic_manual
+            fn = lambda img, ang, cut: rotator.rotate_bicubic_manual(img, ang, cut, sharpness)
         elif method == 'bicubic_ref':
             fn = rotator.rotate_bicubic_ref
         else:
@@ -1389,13 +1441,12 @@ class RotationApp(QMainWindow):
     # ---------- UI callbacks ----------
     def on_method_change(self, text):
         self.method = text
-        self.update_a_visibility()
+        self.update_parameter_visibility()
         if self.original_image is not None:
             self.update_image()
 
     def on_zoom_mode_change(self, text):
         self.zoom_mode = text
-        # Update comparison combo, block signals to avoid triggering update_comparison
         self.zoom_combo_comp.blockSignals(True)
         self.zoom_combo_comp.setCurrentText(text)
         self.zoom_combo_comp.blockSignals(False)
@@ -1416,7 +1467,6 @@ class RotationApp(QMainWindow):
     def on_a_change(self, value):
         self.a_value = value
         self.a_value_label.setText(f"a = {value} (window = {2*value})")
-        # Update comparison slider, block signals
         self.comp_a_slider.blockSignals(True)
         self.comp_a_slider.setValue(value)
         self.comp_a_slider.blockSignals(False)
@@ -1428,9 +1478,29 @@ class RotationApp(QMainWindow):
             if self.tabs.currentIndex() == 1:
                 self.update_comparison()
 
+    def on_bicubic_sharpness_change(self, value):
+        self.bicubic_sharpness = value / 100.0
+        self.bicubic_value_label.setText(f"Sharpness A = {self.bicubic_sharpness:.2f}")
+        self.comp_bicubic_slider.blockSignals(True)
+        self.comp_bicubic_slider.setValue(value)
+        self.comp_bicubic_slider.blockSignals(False)
+        self.comp_bicubic_label.setText(f"Sharpness A = {self.bicubic_sharpness:.2f}")
+        self.clear_cache()
+        if self.original_image is not None:
+            if 'bicubic_manual' in self.method:
+                self.update_image()
+            if self.tabs.currentIndex() == 1:
+                self.update_comparison()
+
     def on_comp_a_change(self, value):
         self.a_value = value
         self.comp_a_label.setText(f"a = {value} (window = {2*value})")
+        self.clear_cache()
+        self.update_comparison()
+
+    def on_comp_bicubic_sharpness_change(self, value):
+        self.bicubic_sharpness = value / 100.0
+        self.comp_bicubic_label.setText(f"Sharpness A = {self.bicubic_sharpness:.2f}")
         self.clear_cache()
         self.update_comparison()
 
@@ -1439,7 +1509,6 @@ class RotationApp(QMainWindow):
         self.angle_edit.setText(str(value))
         if self.original_image is not None:
             self.update_image()
-        # Update comparison controls without emitting signals
         self.comp_slider.blockSignals(True)
         self.comp_slider.setValue(value)
         self.comp_slider.blockSignals(False)
@@ -1523,7 +1592,7 @@ class RotationApp(QMainWindow):
             elif method == 'bilinear_manual':
                 rotated = rotator.rotate_bilinear_manual(self.original_image, self.current_angle, cut)
             elif method == 'bicubic_manual':
-                rotated = rotator.rotate_bicubic_manual(self.original_image, self.current_angle, cut)
+                rotated = rotator.rotate_bicubic_manual(self.original_image, self.current_angle, cut, self.bicubic_sharpness)
             elif method == 'lanczos_manual':
                 rotated = rotator.rotate_lanczos_manual(self.original_image, self.current_angle, cut, self.a_value)
             else:
