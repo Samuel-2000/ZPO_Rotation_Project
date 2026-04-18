@@ -4,6 +4,35 @@ import sys
 import subprocess
 import platform
 
+def install_requirements():
+    """Nainštaluje Python závislosti z requirements.txt."""
+    if not os.path.exists("requirements.txt"):
+        print("requirements.txt not found, skipping.")
+        return True
+    print("Installing Python requirements...")
+    result = subprocess.run([
+        sys.executable, "-m", "pip", "install", "-r", "requirements.txt"
+    ], capture_output=True, text=True)
+    if result.returncode == 0:
+        print("Requirements installed successfully!")
+        return True
+    else:
+        print("Failed to install requirements!")
+        print(result.stderr)
+        return False
+
+
+def check_cpp_extension():
+    """Overí, či je C++ modul dostupný (stačí naimportovať modul)."""
+    try:
+        import cpp_rotator.rotator_cpp
+        print("C++ module is available")
+        return True
+    except ImportError as e:
+        print(f"C++ module not available: {e}")
+        return False
+
+
 def build_cpp_extension():
     """Zkompiluje C++ modul v adresári cpp_rotator."""
     print("Building C++ rotation module...")
@@ -36,32 +65,6 @@ def build_cpp_extension():
     finally:
         os.chdir(original_dir)
 
-def check_cpp_extension():
-    """Ověří, zda je C++ modul dostupný (stačí naimportovať modul)."""
-    try:
-        import cpp_rotator.rotator_cpp
-        print("C++ module is available")
-        return True
-    except ImportError as e:
-        print(f"C++ module not available: {e}")
-        return False
-
-def install_requirements():
-    """Nainštaluje Python závislosti z requirements.txt."""
-    if not os.path.exists("requirements.txt"):
-        print("requirements.txt not found, skipping.")
-        return True
-    print("Installing Python requirements...")
-    result = subprocess.run([
-        sys.executable, "-m", "pip", "install", "-r", "requirements.txt"
-    ], capture_output=True, text=True)
-    if result.returncode == 0:
-        print("Requirements installed successfully!")
-        return True
-    else:
-        print("Failed to install requirements!")
-        print(result.stderr)
-        return False
 
 def add_opencv_dll_path():
     """Pridá cestu k OpenCV DLL do vyhľadávania knižníc (Windows)."""
@@ -100,6 +103,7 @@ def add_opencv_dll_path():
     print("   Skúste manuálne pridať cestu k OpenCV bin do PATH.")
     return False
 
+
 def main():
     print("Image Rotator with C++ core")
     print("=" * 50)
@@ -123,9 +127,9 @@ def main():
     # Spustenie GUI
     try:
         from PyQt5.QtWidgets import QApplication
-        from gui import RotateApp
+        from gui import RotationApp
         app = QApplication(sys.argv)
-        gui = RotateApp()
+        gui = RotationApp()
         gui.show()
         sys.exit(app.exec_())
     except ImportError as e:

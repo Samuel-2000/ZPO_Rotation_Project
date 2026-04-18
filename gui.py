@@ -289,7 +289,7 @@ class SplitImageLabel(QLabel):
             self.clear()
 
 
-class RotateApp(QMainWindow):
+class RotationApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Rotator")
@@ -1544,7 +1544,7 @@ class RotateApp(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    w = RotateApp()
+    w = RotationApp()
     w.resize(1400, 900)
     w.show()
     sys.exit(app.exec_())
