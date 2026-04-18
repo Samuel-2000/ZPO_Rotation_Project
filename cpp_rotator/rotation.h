@@ -14,7 +14,7 @@ cv::Mat rotate_lanczos_ref(const cv::Mat& src, double angle_deg, bool cut_corner
 // Manuálne metódy (backward mapping s vlastnou interpoláciou)
 cv::Mat rotate_nearest_manual(const cv::Mat& src, double angle_deg, bool cut_corners);
 cv::Mat rotate_bilinear_manual(const cv::Mat& src, double angle_deg, bool cut_corners);
-cv::Mat rotate_bicubic_manual(const cv::Mat& src, double angle_deg, bool cut_corners);
+cv::Mat rotate_bicubic_manual(const cv::Mat& src, double angle_deg, bool cut_corners, double sharpness = -0.75);
 cv::Mat rotate_lanczos_manual(const cv::Mat& src, double angle_deg, bool cut_corners, int a);
 
 void get_max_inner_rect(double w, double h, double angle_deg, double &out_w, double &out_h);

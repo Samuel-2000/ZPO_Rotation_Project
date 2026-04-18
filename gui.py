@@ -170,7 +170,6 @@ class SplitImageLabel(QLabel):
     def mousePressEvent(self, event):
         if self.pixmap() is None or self.img_left is None:
             return
-        # Allow selection anywhere on the label (split line is ignored)
         self.origin = event.pos()
         if self.rubber_band is None:
             from PyQt5.QtWidgets import QRubberBand
@@ -320,9 +319,11 @@ class RotationApp(QMainWindow):
         self.method_funcs = {
             'nearest_ref': rotator.rotate_nearest_ref,
             'bilinear_ref': rotator.rotate_bilinear_ref,
-            'lanczos_ref': rotator.rotate_lanczos_ref,   # fixed a=4 (OpenCV)
+            'bicubic_ref': rotator.rotate_bicubic_ref,
+            'lanczos_ref': rotator.rotate_lanczos_ref,
             'nearest_manual': rotator.rotate_nearest_manual,
             'bilinear_manual': rotator.rotate_bilinear_manual,
+            'bicubic_manual': rotator.rotate_bicubic_manual,
             'lanczos_manual': lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, self.a_value)
         }
 
@@ -372,8 +373,8 @@ class RotationApp(QMainWindow):
         left.addWidget(QLabel("Method:"))
         self.method_combo = QComboBox()
         self.method_combo.addItems([
-            'nearest_ref', 'bilinear_ref', 'lanczos_ref (a=4 fixed)',
-            'nearest_manual', 'bilinear_manual', 'lanczos_manual'
+            'nearest_ref', 'bilinear_ref', 'bicubic_ref', 'lanczos_ref (a=4 fixed)',
+            'nearest_manual', 'bilinear_manual', 'bicubic_manual', 'lanczos_manual'
         ])
         self.method_combo.currentTextChanged.connect(self.on_method_change)
         self.method = self.method_combo.currentText()
@@ -458,8 +459,8 @@ class RotationApp(QMainWindow):
         method_layout.addWidget(QLabel("Method:"))
         self.split_method_combo = QComboBox()
         self.split_method_combo.addItems([
-            'nearest_ref', 'bilinear_ref', 'lanczos_ref (a=4 fixed)',
-            'nearest_manual', 'bilinear_manual', 'lanczos_manual'
+            'nearest_ref', 'bilinear_ref', 'bicubic_ref', 'lanczos_ref (a=4 fixed)',
+            'nearest_manual', 'bilinear_manual', 'bicubic_manual', 'lanczos_manual'
         ])
         self.split_method_combo.currentTextChanged.connect(self.on_split_method_change)
         method_layout.addWidget(self.split_method_combo)
@@ -556,6 +557,7 @@ class RotationApp(QMainWindow):
         pairs = [
             ('nearest_ref', 'nearest_manual'),
             ('bilinear_ref', 'bilinear_manual'),
+            ('bicubic_ref', 'bicubic_manual'),
             ('lanczos_ref', 'lanczos_manual'),
         ]
         self.method_cells = []
@@ -851,9 +853,11 @@ class RotationApp(QMainWindow):
         method_funcs = {
             'nearest_ref': rotator.rotate_nearest_ref,
             'bilinear_ref': rotator.rotate_bilinear_ref,
+            'bicubic_ref': rotator.rotate_bicubic_ref,
             'lanczos_ref': rotator.rotate_lanczos_ref,
             'nearest_manual': rotator.rotate_nearest_manual,
             'bilinear_manual': rotator.rotate_bilinear_manual,
+            'bicubic_manual': rotator.rotate_bicubic_manual,
             'lanczos_manual': lambda img, ang, cut_flag: rotator.rotate_lanczos_manual(img, ang, cut_flag, a)
         }
 
@@ -863,6 +867,8 @@ class RotationApp(QMainWindow):
         split_method = self.split_method_combo.currentText()
         if split_method == 'lanczos_ref (a=4 fixed)':
             split_method = 'lanczos_ref'
+        elif split_method == 'bicubic_ref (a=4 fixed)':  # just in case
+            split_method = 'bicubic_ref'
         right_img = None
         try:
             if split_method in method_funcs:
@@ -935,7 +941,7 @@ class RotationApp(QMainWindow):
             self.split_image_label.update()
 
         # ---------------------------
-        # 3x2 GRID
+        # 4x2 GRID (added bicubic)
         # ---------------------------
         for (ref_name, ref_img_label, ref_psnr_label, ref_btn,
              man_name, man_img_label, man_psnr_label, man_btn) in self.method_cells:
@@ -1166,9 +1172,9 @@ class RotationApp(QMainWindow):
         return self.psnr_cache != {} and self.cache_params == params
 
     def get_methods_list(self):
-        base = ['nearest_ref', 'bilinear_ref', 'lanczos_ref']
+        base = ['nearest_ref', 'bilinear_ref', 'bicubic_ref', 'lanczos_ref']
         if self.show_manual:
-            return base + ['nearest_manual', 'bilinear_manual', 'lanczos_manual']
+            return base + ['nearest_manual', 'bilinear_manual', 'bicubic_manual', 'lanczos_manual']
         else:
             return base
 
@@ -1189,6 +1195,10 @@ class RotationApp(QMainWindow):
         a = params['a']
         if method == 'lanczos_manual':
             fn = lambda img, ang, cut: rotator.rotate_lanczos_manual(img, ang, cut, a)
+        elif method == 'bicubic_manual':
+            fn = rotator.rotate_bicubic_manual
+        elif method == 'bicubic_ref':
+            fn = rotator.rotate_bicubic_ref
         else:
             fn = getattr(rotator, f'rotate_{method}', None)
         if fn is None:
@@ -1206,13 +1216,11 @@ class RotationApp(QMainWindow):
                 if sel_common is not None:
                     x0, y0, w0, h0 = sel_common
                     if w0 > 0 and h0 > 0:
-                        # Make contiguous copies before passing to C++
                         orig_sel = orig_crop[y0:y0+h0, x0:x0+w0].copy()
                         inv_sel = inv_crop[y0:y0+h0, x0:x0+w0].copy()
                         return rotator.psnr(orig_sel, inv_sel)
                 return -1.0
             else:
-                # No selection: use whole aligned images, but ensure they are contiguous
                 return rotator.psnr(orig_crop.copy(), inv_crop.copy())
         except Exception as e:
             print(f"Error computing PSNR for {method} at {angle}: {e}")
@@ -1279,7 +1287,7 @@ class RotationApp(QMainWindow):
             return
         fig = Figure(figsize=(10, 6))
         ax = fig.add_subplot(111)
-        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown']
+        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
         methods = self.get_methods_list()
         all_angles = []
         for method in methods:
@@ -1351,13 +1359,15 @@ class RotationApp(QMainWindow):
                 base = m.replace('_ref', '')
                 if base == 'lanczos':
                     labels.append('Lanczos ref\n(a=4)')
+                elif base == 'bicubic':
+                    labels.append('Bicubic ref')
                 else:
                     labels.append(f'{base}\nref')
             else:
                 base = m.replace('_manual', '')
                 labels.append(f'{base}\nman')
 
-        fig = Figure(figsize=(10, 6))
+        fig = Figure(figsize=(12, 6))
         ax = fig.add_subplot(111)
         bp = ax.boxplot(data, labels=labels, patch_artist=True)
 
@@ -1498,16 +1508,22 @@ class RotationApp(QMainWindow):
             method = self.method_combo.currentText()
             if method == 'lanczos_ref (a=4 fixed)':
                 method = 'lanczos_ref'
+            elif method == 'bicubic_ref (a=4 fixed)':   # just in case
+                method = 'bicubic_ref'
             if method == 'nearest_ref':
                 rotated = rotator.rotate_nearest_ref(self.original_image, self.current_angle, cut)
             elif method == 'bilinear_ref':
                 rotated = rotator.rotate_bilinear_ref(self.original_image, self.current_angle, cut)
+            elif method == 'bicubic_ref':
+                rotated = rotator.rotate_bicubic_ref(self.original_image, self.current_angle, cut)
             elif method == 'lanczos_ref':
                 rotated = rotator.rotate_lanczos_ref(self.original_image, self.current_angle, cut)
             elif method == 'nearest_manual':
                 rotated = rotator.rotate_nearest_manual(self.original_image, self.current_angle, cut)
             elif method == 'bilinear_manual':
                 rotated = rotator.rotate_bilinear_manual(self.original_image, self.current_angle, cut)
+            elif method == 'bicubic_manual':
+                rotated = rotator.rotate_bicubic_manual(self.original_image, self.current_angle, cut)
             elif method == 'lanczos_manual':
                 rotated = rotator.rotate_lanczos_manual(self.original_image, self.current_angle, cut, self.a_value)
             else:

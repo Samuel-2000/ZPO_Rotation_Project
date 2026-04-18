@@ -53,53 +53,49 @@ cv::Vec3b bilinear_interpolate(const cv::Mat& img, float x, float y) {
 }
 
 // ---------- Bicubic interpolation ----------
-static double cubic_weight(double x) {
-    x = fabs(x);
-    if (x < 1.0) {
-        return (1.5 * x - 2.5) * x * x + 1.0;
-    } else if (x < 2.0) {
-        return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
-    }
-    return 0.0;
+// OpenCV's bicubic interpolation kernel (A = -0.75)
+static inline void cubic_coeffs(float x, float A, float coeffs[4]) {
+    coeffs[0] = ((A * (x + 1) - 5 * A) * (x + 1) + 8 * A) * (x + 1) - 4 * A;
+    coeffs[1] = ((A + 2) * x - (A + 3)) * x * x + 1;
+    coeffs[2] = ((A + 2) * (1 - x) - (A + 3)) * (1 - x) * (1 - x) + 1;
+    coeffs[3] = 1.f - coeffs[0] - coeffs[1] - coeffs[2];
 }
 
-cv::Vec3b bicubic_interpolate(const cv::Mat& img, float x, float y) {
+cv::Vec3b bicubic_interpolate(const cv::Mat& img, float x, float y, float A = -0.75f) {
     int x0 = (int)std::floor(x);
     int y0 = (int)std::floor(y);
     float dx = x - x0;
     float dy = y - y0;
 
-    cv::Vec3d accum(0.0, 0.0, 0.0);
-    double weight_sum = 0.0;
+    float wx[4], wy[4];
+    cubic_coeffs(dx, A, wx);
+    cubic_coeffs(dy, A, wy);
 
-    for (int m = -1; m <= 2; ++m) {
-        int iy = y0 + m;
-        if (iy < 0 || iy >= img.rows) continue;
-        double wy = cubic_weight(m - dy);
-        for (int n = -1; n <= 2; ++n) {
-            int ix = x0 + n;
-            if (ix < 0 || ix >= img.cols) continue;
-            double wx = cubic_weight(n - dx);
-            double w = wx * wy;
-            if (w != 0.0) {
-                cv::Vec3b p = img.at<cv::Vec3b>(iy, ix);
-                accum[0] += w * p[0];
-                accum[1] += w * p[1];
-                accum[2] += w * p[2];
-                weight_sum += w;
+    cv::Vec3d accum(0.0, 0.0, 0.0);
+
+    for (int m = 0; m < 4; ++m) {
+        int iy = y0 + m - 1;
+        float wy_val = wy[m];
+        if (wy_val == 0.0f) continue;
+        for (int n = 0; n < 4; ++n) {
+            int ix = x0 + n - 1;
+            float w = wx[n] * wy_val;
+            if (w != 0.0f) {
+                if (ix >= 0 && ix < img.cols && iy >= 0 && iy < img.rows) {
+                    cv::Vec3b p = img.at<cv::Vec3b>(iy, ix);
+                    accum[0] += w * p[0];
+                    accum[1] += w * p[1];
+                    accum[2] += w * p[2];
+                }
             }
         }
     }
 
-    if (weight_sum > 1e-6) {
-        accum /= weight_sum;
-        return cv::Vec3b(cv::saturate_cast<uchar>(accum[0]),
-                         cv::saturate_cast<uchar>(accum[1]),
-                         cv::saturate_cast<uchar>(accum[2]));
-    } else {
-        return cv::Vec3b(0, 0, 0);
-    }
+    return cv::Vec3b(cv::saturate_cast<uchar>(accum[0]),
+                     cv::saturate_cast<uchar>(accum[1]),
+                     cv::saturate_cast<uchar>(accum[2]));
 }
+
 
 static double lanczos_kernel(double x, int a) {
     if (x == 0.0) return 1.0;
@@ -301,22 +297,23 @@ cv::Mat rotate_bilinear_manual(const cv::Mat& src, double angle_deg, bool cut_co
     return dst;
 }
 
-cv::Mat rotate_bicubic_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
+cv::Mat rotate_bicubic_manual(const cv::Mat& src, double angle_deg, bool cut_corners, double sharpness) {
     ManualRotParams p = prepare_manual_rotation(src, angle_deg, cut_corners);
     cv::Mat dst = cv::Mat::zeros(p.dst_size.height, p.dst_size.width, CV_8UC3);
 
-    // Optional parallelisation – uncomment if desired
-    // cv::parallel_for_(cv::Range(0, p.dst_size.height), [&](const cv::Range& range) {
-    //     for (int y = range.start; y < range.end; ++y) {
-    for (int y = 0; y < p.dst_size.height; ++y) {
-        for (int x = 0; x < p.dst_size.width; ++x) {
-            double world_x = x - p.translation.x;
-            double world_y = y - p.translation.y;
-            double x_src = p.invM.at<double>(0,0)*world_x + p.invM.at<double>(0,1)*world_y + p.invM.at<double>(0,2);
-            double y_src = p.invM.at<double>(1,0)*world_x + p.invM.at<double>(1,1)*world_y + p.invM.at<double>(1,2);
-            dst.at<cv::Vec3b>(y, x) = bicubic_interpolate(src, (float)x_src, (float)y_src);
+    float A = static_cast<float>(sharpness);
+
+    cv::parallel_for_(cv::Range(0, p.dst_size.height), [&](const cv::Range& range) {
+        for (int y = range.start; y < range.end; ++y) {
+            for (int x = 0; x < p.dst_size.width; ++x) {
+                double world_x = x - p.translation.x;
+                double world_y = y - p.translation.y;
+                double x_src = p.invM.at<double>(0,0) * world_x + p.invM.at<double>(0,1) * world_y + p.invM.at<double>(0,2);
+                double y_src = p.invM.at<double>(1,0) * world_x + p.invM.at<double>(1,1) * world_y + p.invM.at<double>(1,2);
+                dst.at<cv::Vec3b>(y, x) = bicubic_interpolate(src, (float)x_src, (float)y_src, A);
+            }
         }
-    }
+    });
     return dst;
 }
 

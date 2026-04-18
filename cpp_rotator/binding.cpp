@@ -65,11 +65,11 @@ PYBIND11_MODULE(rotator_cpp, m) {
         return cv_to_numpy(dst);
     }, py::arg("img"), py::arg("angle"), py::arg("cut_corners") = true);
 
-    m.def("rotate_bicubic_manual", [](py::array_t<unsigned char> img, double angle, bool cut_corners) {
+    m.def("rotate_bicubic_manual", [](py::array_t<unsigned char> img, double angle, bool cut_corners, double sharpness) {
         cv::Mat src = numpy_to_cv(img);
-        cv::Mat dst = rotate_bicubic_manual(src, angle, cut_corners);
+        cv::Mat dst = rotate_bicubic_manual(src, angle, cut_corners, sharpness);
         return cv_to_numpy(dst);
-    }, py::arg("img"), py::arg("angle"), py::arg("cut_corners") = true);
+    }, py::arg("img"), py::arg("angle"), py::arg("cut_corners") = true, py::arg("sharpness") = -0.75);
 
     m.def("rotate_lanczos_manual", [](py::array_t<unsigned char> img, double angle, bool cut_corners, int a) {
         cv::Mat src = numpy_to_cv(img);
