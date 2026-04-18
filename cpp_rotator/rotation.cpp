@@ -54,7 +54,6 @@ cv::Vec3b bilinear_interpolate(const cv::Mat& img, float x, float y) {
 
 // ---------- Bicubic interpolation ----------
 static double cubic_weight(double x) {
-    // Mitchell‑Netravali / Catmull‑Rom kernel (standard bicubic)
     x = fabs(x);
     if (x < 1.0) {
         return (1.5 * x - 2.5) * x * x + 1.0;
@@ -144,7 +143,7 @@ cv::Vec3b lanczos_interpolate(const cv::Mat& img, float x, float y, int a) {
     }
 }
 
-// ---------- compute bbox ----------
+// ---------- Common bounding box computation ----------
 void compute_bbox(const cv::Mat& src, double angle_deg, cv::Size& dst_size, cv::Point2d& translation) {
     double rad = angle_deg * CV_PI / 180.0;
     double cos_a = cos(rad);
@@ -178,323 +177,204 @@ void compute_bbox(const cv::Mat& src, double angle_deg, cv::Size& dst_size, cv::
     translation = cv::Point2d(-min_x, -min_y);
 }
 
-// ---------- reference methods (OpenCV warpAffine) ----------
-cv::Mat rotate_nearest_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
-    cv::Mat rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
+// ---------- Structures and helpers for common rotation setup ----------
+struct ManualRotParams {
+    cv::Mat invM;                // 3x3 inverse transformation matrix
+    cv::Size dst_size;           // size of destination image
+    cv::Point2d translation;     // offset to convert destination pixel to world coordinates
+};
+
+ManualRotParams prepare_manual_rotation(const cv::Mat& src, double angle_deg, bool cut_corners) {
+    ManualRotParams params;
+
+    double rad = angle_deg * CV_PI / 180.0;
+    double cx = src.cols / 2.0;
+    double cy = src.rows / 2.0;
+
+    // Build transformation matrix (same for all manual methods)
+    cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
+    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
+    cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
+    cv::Mat M = T_back * R * T_origin;
+    params.invM = M.inv(cv::DECOMP_SVD);
+
+    if (!cut_corners) {
+        cv::Point2d trans;
+        compute_bbox(src, angle_deg, params.dst_size, trans);
+        params.translation = trans;
+    } else {
+        params.dst_size = src.size();
+        params.translation = cv::Point2d(0,0);
+    }
+
+    return params;
+}
+
+struct RefRotParams {
+    cv::Mat rot_mat;    // 2x3 affine rotation matrix (OpenCV style)
     cv::Size dst_size;
+};
+
+RefRotParams prepare_ref_rotation(const cv::Mat& src, double angle_deg, bool cut_corners) {
+    RefRotParams params;
+    cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
+    params.rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
+
     cv::Point2f translation(0,0);
     if (!cut_corners) {
         cv::Size full_size;
         cv::Point2d trans;
         compute_bbox(src, angle_deg, full_size, trans);
-        dst_size = full_size;
+        params.dst_size = full_size;
         translation = cv::Point2f(trans.x, trans.y);
-        rot_mat.at<double>(0,2) += translation.x;
-        rot_mat.at<double>(1,2) += translation.y;
+        params.rot_mat.at<double>(0,2) += translation.x;
+        params.rot_mat.at<double>(1,2) += translation.y;
     } else {
-        dst_size = src.size();
+        params.dst_size = src.size();
     }
+
+    return params;
+}
+
+// ---------- Reference methods (OpenCV warpAffine) ----------
+cv::Mat rotate_nearest_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
+    RefRotParams p = prepare_ref_rotation(src, angle_deg, cut_corners);
     cv::Mat dst;
-    cv::warpAffine(src, dst, rot_mat, dst_size, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
+    cv::warpAffine(src, dst, p.rot_mat, p.dst_size, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
     return dst;
 }
 
 cv::Mat rotate_bilinear_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
-    cv::Mat rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
-    cv::Size dst_size;
-    cv::Point2f translation(0,0);
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        dst_size = full_size;
-        translation = cv::Point2f(trans.x, trans.y);
-        rot_mat.at<double>(0,2) += translation.x;
-        rot_mat.at<double>(1,2) += translation.y;
-    } else {
-        dst_size = src.size();
-    }
+    RefRotParams p = prepare_ref_rotation(src, angle_deg, cut_corners);
     cv::Mat dst;
-    cv::warpAffine(src, dst, rot_mat, dst_size, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
+    cv::warpAffine(src, dst, p.rot_mat, p.dst_size, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
     return dst;
 }
 
 cv::Mat rotate_bicubic_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
-    cv::Mat rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
-    cv::Size dst_size;
-    cv::Point2f translation(0, 0);
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        dst_size = full_size;
-        translation = cv::Point2f(trans.x, trans.y);
-        rot_mat.at<double>(0, 2) += translation.x;
-        rot_mat.at<double>(1, 2) += translation.y;
-    } else {
-        dst_size = src.size();
-    }
+    RefRotParams p = prepare_ref_rotation(src, angle_deg, cut_corners);
     cv::Mat dst;
-    cv::warpAffine(src, dst, rot_mat, dst_size, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+    cv::warpAffine(src, dst, p.rot_mat, p.dst_size, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
     return dst;
 }
 
 cv::Mat rotate_lanczos_ref(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    cv::Point2f center(src.cols / 2.0f, src.rows / 2.0f);
-    cv::Mat rot_mat = cv::getRotationMatrix2D(center, -angle_deg, 1.0);
-    cv::Size dst_size;
-    cv::Point2f translation(0,0);
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        dst_size = full_size;
-        translation = cv::Point2f(trans.x, trans.y);
-        rot_mat.at<double>(0,2) += translation.x;
-        rot_mat.at<double>(1,2) += translation.y;
-    } else {
-        dst_size = src.size();
-    }
+    RefRotParams p = prepare_ref_rotation(src, angle_deg, cut_corners);
     cv::Mat dst;
-    cv::warpAffine(src, dst, rot_mat, dst_size, cv::INTER_LANCZOS4, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
+    cv::warpAffine(src, dst, p.rot_mat, p.dst_size, cv::INTER_LANCZOS4, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
     return dst;
 }
 
-// ---------- manual methods (backward mapping) ----------
+// ---------- Manual methods (backward mapping) ----------
 cv::Mat rotate_nearest_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    double rad = angle_deg * CV_PI / 180.0;
-    double cx = src.cols / 2.0;
-    double cy = src.rows / 2.0;
+    ManualRotParams p = prepare_manual_rotation(src, angle_deg, cut_corners);
+    cv::Mat dst = cv::Mat::zeros(p.dst_size.height, p.dst_size.width, CV_8UC3);
 
-    cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
-    cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
-    cv::Mat M = T_back * R * T_origin;
-    cv::Mat invM = M.inv(cv::DECOMP_SVD);
-
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        cv::Mat dst = cv::Mat::zeros(full_size.height, full_size.width, CV_8UC3);
-        for (int y = 0; y < full_size.height; ++y) {
-            for (int x = 0; x < full_size.width; ++x) {
-                double world_x = x - trans.x;
-                double world_y = y - trans.y;
-                double x_src = invM.at<double>(0,0)*world_x + invM.at<double>(0,1)*world_y + invM.at<double>(0,2);
-                double y_src = invM.at<double>(1,0)*world_x + invM.at<double>(1,1)*world_y + invM.at<double>(1,2);
-                int ix = cvRound(x_src);
-                int iy = cvRound(y_src);
-                if (ix >= 0 && ix < src.cols && iy >= 0 && iy < src.rows)
-                    dst.at<cv::Vec3b>(y, x) = src.at<cv::Vec3b>(iy, ix);
-            }
+    for (int y = 0; y < p.dst_size.height; ++y) {
+        for (int x = 0; x < p.dst_size.width; ++x) {
+            double world_x = x - p.translation.x;
+            double world_y = y - p.translation.y;
+            double x_src = p.invM.at<double>(0,0)*world_x + p.invM.at<double>(0,1)*world_y + p.invM.at<double>(0,2);
+            double y_src = p.invM.at<double>(1,0)*world_x + p.invM.at<double>(1,1)*world_y + p.invM.at<double>(1,2);
+            int ix = cvRound(x_src);
+            int iy = cvRound(y_src);
+            if (ix >= 0 && ix < src.cols && iy >= 0 && iy < src.rows)
+                dst.at<cv::Vec3b>(y, x) = src.at<cv::Vec3b>(iy, ix);
         }
-        return dst;
-    } else {
-        cv::Mat dst = cv::Mat::zeros(src.size(), CV_8UC3);
-        for (int y = 0; y < src.rows; ++y) {
-            for (int x = 0; x < src.cols; ++x) {
-                double x_src = invM.at<double>(0,0)*x + invM.at<double>(0,1)*y + invM.at<double>(0,2);
-                double y_src = invM.at<double>(1,0)*x + invM.at<double>(1,1)*y + invM.at<double>(1,2);
-                int ix = cvRound(x_src);
-                int iy = cvRound(y_src);
-                if (ix >= 0 && ix < src.cols && iy >= 0 && iy < src.rows)
-                    dst.at<cv::Vec3b>(y, x) = src.at<cv::Vec3b>(iy, ix);
-            }
-        }
-        return dst;
     }
+    return dst;
 }
 
 cv::Mat rotate_bilinear_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    double rad = angle_deg * CV_PI / 180.0;
-    double cx = src.cols / 2.0;
-    double cy = src.rows / 2.0;
+    ManualRotParams p = prepare_manual_rotation(src, angle_deg, cut_corners);
+    cv::Mat dst = cv::Mat::zeros(p.dst_size.height, p.dst_size.width, CV_8UC3);
 
-    cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
-    cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
-    cv::Mat M = T_back * R * T_origin;
-    cv::Mat invM = M.inv(cv::DECOMP_SVD);
-
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        cv::Mat dst = cv::Mat::zeros(full_size.height, full_size.width, CV_8UC3);
-        for (int y = 0; y < full_size.height; ++y) {
-            for (int x = 0; x < full_size.width; ++x) {
-                double world_x = x - trans.x;
-                double world_y = y - trans.y;
-                double x_src = invM.at<double>(0,0)*world_x + invM.at<double>(0,1)*world_y + invM.at<double>(0,2);
-                double y_src = invM.at<double>(1,0)*world_x + invM.at<double>(1,1)*world_y + invM.at<double>(1,2);
-                dst.at<cv::Vec3b>(y, x) = bilinear_interpolate(src, (float)x_src, (float)y_src);
-            }
+    for (int y = 0; y < p.dst_size.height; ++y) {
+        for (int x = 0; x < p.dst_size.width; ++x) {
+            double world_x = x - p.translation.x;
+            double world_y = y - p.translation.y;
+            double x_src = p.invM.at<double>(0,0)*world_x + p.invM.at<double>(0,1)*world_y + p.invM.at<double>(0,2);
+            double y_src = p.invM.at<double>(1,0)*world_x + p.invM.at<double>(1,1)*world_y + p.invM.at<double>(1,2);
+            dst.at<cv::Vec3b>(y, x) = bilinear_interpolate(src, (float)x_src, (float)y_src);
         }
-        return dst;
-    } else {
-        cv::Mat dst = cv::Mat::zeros(src.size(), CV_8UC3);
-        for (int y = 0; y < src.rows; ++y) {
-            for (int x = 0; x < src.cols; ++x) {
-                double x_src = invM.at<double>(0,0)*x + invM.at<double>(0,1)*y + invM.at<double>(0,2);
-                double y_src = invM.at<double>(1,0)*x + invM.at<double>(1,1)*y + invM.at<double>(1,2);
-                dst.at<cv::Vec3b>(y, x) = bilinear_interpolate(src, (float)x_src, (float)y_src);
-            }
-        }
-        return dst;
     }
+    return dst;
 }
 
-
-// ---------- Bicubic manual ----------
 cv::Mat rotate_bicubic_manual(const cv::Mat& src, double angle_deg, bool cut_corners) {
-    double rad = angle_deg * CV_PI / 180.0;
-    double cx = src.cols / 2.0;
-    double cy = src.rows / 2.0;
+    ManualRotParams p = prepare_manual_rotation(src, angle_deg, cut_corners);
+    cv::Mat dst = cv::Mat::zeros(p.dst_size.height, p.dst_size.width, CV_8UC3);
 
-    cv::Mat T_origin = (cv::Mat_<double>(3, 3) << 1, 0, -cx, 0, 1, -cy, 0, 0, 1);
-    cv::Mat R = (cv::Mat_<double>(3, 3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0, 0, 1);
-    cv::Mat T_back = (cv::Mat_<double>(3, 3) << 1, 0, cx, 0, 1, cy, 0, 0, 1);
-    cv::Mat M = T_back * R * T_origin;
-    cv::Mat invM = M.inv(cv::DECOMP_SVD);
-
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        cv::Mat dst = cv::Mat::zeros(full_size.height, full_size.width, CV_8UC3);
-
-        // Optional parallelisation (like Lanczos) – uncomment if needed
-        // cv::parallel_for_(cv::Range(0, full_size.height), [&](const cv::Range& range) {
-        //     for (int y = range.start; y < range.end; ++y) {
-        for (int y = 0; y < full_size.height; ++y) {
-            for (int x = 0; x < full_size.width; ++x) {
-                double world_x = x - trans.x;
-                double world_y = y - trans.y;
-                double x_src = invM.at<double>(0, 0) * world_x + invM.at<double>(0, 1) * world_y + invM.at<double>(0, 2);
-                double y_src = invM.at<double>(1, 0) * world_x + invM.at<double>(1, 1) * world_y + invM.at<double>(1, 2);
-                dst.at<cv::Vec3b>(y, x) = bicubic_interpolate(src, (float)x_src, (float)y_src);
-            }
+    // Optional parallelisation – uncomment if desired
+    // cv::parallel_for_(cv::Range(0, p.dst_size.height), [&](const cv::Range& range) {
+    //     for (int y = range.start; y < range.end; ++y) {
+    for (int y = 0; y < p.dst_size.height; ++y) {
+        for (int x = 0; x < p.dst_size.width; ++x) {
+            double world_x = x - p.translation.x;
+            double world_y = y - p.translation.y;
+            double x_src = p.invM.at<double>(0,0)*world_x + p.invM.at<double>(0,1)*world_y + p.invM.at<double>(0,2);
+            double y_src = p.invM.at<double>(1,0)*world_x + p.invM.at<double>(1,1)*world_y + p.invM.at<double>(1,2);
+            dst.at<cv::Vec3b>(y, x) = bicubic_interpolate(src, (float)x_src, (float)y_src);
         }
-        // });
-        return dst;
-    } else {
-        cv::Mat dst = cv::Mat::zeros(src.size(), CV_8UC3);
-        for (int y = 0; y < src.rows; ++y) {
-            for (int x = 0; x < src.cols; ++x) {
-                double x_src = invM.at<double>(0, 0) * x + invM.at<double>(0, 1) * y + invM.at<double>(0, 2);
-                double y_src = invM.at<double>(1, 0) * x + invM.at<double>(1, 1) * y + invM.at<double>(1, 2);
-                dst.at<cv::Vec3b>(y, x) = bicubic_interpolate(src, (float)x_src, (float)y_src);
-            }
-        }
-        return dst;
     }
+    return dst;
 }
 
 cv::Mat rotate_lanczos_manual(const cv::Mat& src, double angle_deg, bool cut_corners, int a) {
-    double rad = angle_deg * CV_PI / 180.0;
-    double cx = src.cols / 2.0;
-    double cy = src.rows / 2.0;
+    ManualRotParams p = prepare_manual_rotation(src, angle_deg, cut_corners);
+    cv::Mat dst = cv::Mat::zeros(p.dst_size.height, p.dst_size.width, CV_8UC3);
 
-    cv::Mat T_origin = (cv::Mat_<double>(3,3) << 1,0,-cx, 0,1,-cy, 0,0,1);
-    cv::Mat R = (cv::Mat_<double>(3,3) << cos(rad), -sin(rad), 0, sin(rad), cos(rad), 0, 0,0,1);
-    cv::Mat T_back = (cv::Mat_<double>(3,3) << 1,0,cx, 0,1,cy, 0,0,1);
-    cv::Mat M = T_back * R * T_origin;
-    cv::Mat invM = M.inv(cv::DECOMP_SVD);
-
-    if (!cut_corners) {
-        cv::Size full_size;
-        cv::Point2d trans;
-        compute_bbox(src, angle_deg, full_size, trans);
-        cv::Mat dst = cv::Mat::zeros(full_size.height, full_size.width, CV_8UC3);
-
-        cv::parallel_for_(cv::Range(0, full_size.height), [&](const cv::Range& range) {
-            for (int y = range.start; y < range.end; ++y) {
-                for (int x = 0; x < full_size.width; ++x) {
-                    double world_x = x - trans.x;
-                    double world_y = y - trans.y;
-                    double x_src = invM.at<double>(0,0)*world_x + invM.at<double>(0,1)*world_y + invM.at<double>(0,2);
-                    double y_src = invM.at<double>(1,0)*world_x + invM.at<double>(1,1)*world_y + invM.at<double>(1,2);
-                    dst.at<cv::Vec3b>(y, x) = lanczos_interpolate(src, (float)x_src, (float)y_src, a);
-                }
+    cv::parallel_for_(cv::Range(0, p.dst_size.height), [&](const cv::Range& range) {
+        for (int y = range.start; y < range.end; ++y) {
+            for (int x = 0; x < p.dst_size.width; ++x) {
+                double world_x = x - p.translation.x;
+                double world_y = y - p.translation.y;
+                double x_src = p.invM.at<double>(0,0)*world_x + p.invM.at<double>(0,1)*world_y + p.invM.at<double>(0,2);
+                double y_src = p.invM.at<double>(1,0)*world_x + p.invM.at<double>(1,1)*world_y + p.invM.at<double>(1,2);
+                dst.at<cv::Vec3b>(y, x) = lanczos_interpolate(src, (float)x_src, (float)y_src, a);
             }
-        });
-        return dst;
-    } else {
-        cv::Mat dst = cv::Mat::zeros(src.size(), CV_8UC3);
-
-        cv::parallel_for_(cv::Range(0, src.rows), [&](const cv::Range& range) {
-            for (int y = range.start; y < range.end; ++y) {
-                for (int x = 0; x < src.cols; ++x) {
-                    double x_src = invM.at<double>(0,0)*x + invM.at<double>(0,1)*y + invM.at<double>(0,2);
-                    double y_src = invM.at<double>(1,0)*x + invM.at<double>(1,1)*y + invM.at<double>(1,2);
-                    dst.at<cv::Vec3b>(y, x) = lanczos_interpolate(src, (float)x_src, (float)y_src, a);
-                }
-            }
-        });
-        return dst;
-    }
+        }
+    });
+    return dst;
 }
 
-
-// ---------- maximal inner rectangle ----------
-// compute maximal axis-aligned rectangle (width,height) that fits inside rotated rectangle
-// Input w,h are original image width and height, angle_deg is rotation angle in degrees
-void get_max_inner_rect(double w, double h, double angle_deg, double &out_w, double &out_h)
-{
-    // Normalize angle
+// ---------- Maximal inner rectangle ----------
+void get_max_inner_rect(double w, double h, double angle_deg, double &out_w, double &out_h) {
     double angle = fmod(angle_deg, 180.0);
     if (angle < 0) angle += 180.0;
     if (angle > 90.0) angle = 180.0 - angle;
 
     double theta = angle * CV_PI / 180.0;
-
     double sin_a = fabs(sin(theta));
     double cos_a = fabs(cos(theta));
 
-    if (sin_a == 0.0)
-    {
+    if (sin_a == 0.0) {
         out_w = w;
         out_h = h;
         return;
     }
-
-    if (cos_a == 0.0)
-    {
+    if (cos_a == 0.0) {
         out_w = h;
         out_h = w;
         return;
     }
 
     bool width_longer = w >= h;
-
     double side_long  = width_longer ? w : h;
     double side_short = width_longer ? h : w;
-
     double wr, hr;
 
-    if (side_short <= 2.0 * sin_a * cos_a * side_long)
-    {
+    if (side_short <= 2.0 * sin_a * cos_a * side_long) {
         double x = 0.5 * side_short;
-
-        if (width_longer)
-        {
+        if (width_longer) {
             wr = x / sin_a;
             hr = x / cos_a;
-        }
-        else
-        {
+        } else {
             wr = x / cos_a;
             hr = x / sin_a;
         }
-    }
-    else
-    {
+    } else {
         double cos_2a = cos_a * cos_a - sin_a * sin_a;
-
         wr = (w * cos_a - h * sin_a) / cos_2a;
         hr = (h * cos_a - w * sin_a) / cos_2a;
     }
