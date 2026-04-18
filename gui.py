@@ -359,7 +359,7 @@ class RotationApp(QMainWindow):
         self.pattern_btn.clicked.connect(self.generate_checkerboard)
         left.addWidget(self.pattern_btn)
 
-        left.addWidget(QLabel("Method:"))
+        left.addWidget(QLabel("reconstruction Method:"))
         self.method_combo = QComboBox()
         self.method_combo.addItems([
             'nearest_ref', 'bilinear_ref', 'bicubic_ref', 'lanczos_ref (a=4 fixed)',
@@ -369,7 +369,7 @@ class RotationApp(QMainWindow):
         self.method = self.method_combo.currentText()
         left.addWidget(self.method_combo)
 
-        left.addWidget(QLabel("Zoom mode:"))
+        left.addWidget(QLabel("zoom mapping mode:"))
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(['cut', 'preserve', 'zoom_to_content'])
         self.zoom_combo.setCurrentText(self.zoom_mode)
@@ -471,7 +471,7 @@ class RotationApp(QMainWindow):
         split_layout = QVBoxLayout(split_group)
 
         method_layout = QHBoxLayout()
-        method_layout.addWidget(QLabel("Method:"))
+        method_layout.addWidget(QLabel("reconstruction Method:"))
         self.split_method_combo = QComboBox()
         self.split_method_combo.addItems([
             'nearest_ref', 'bilinear_ref', 'bicubic_ref', 'lanczos_ref (a=4 fixed)',
@@ -541,7 +541,7 @@ class RotationApp(QMainWindow):
 
         left_panel.addWidget(psnr_group)
 
-        left_panel.addWidget(QLabel("Zoom mode:"))
+        left_panel.addWidget(QLabel("zoom mapping mode:"))
         self.zoom_combo_comp = QComboBox()
         self.zoom_combo_comp.addItems(['cut', 'preserve', 'zoom_to_content'])
         self.zoom_combo_comp.setCurrentText(self.zoom_mode)
